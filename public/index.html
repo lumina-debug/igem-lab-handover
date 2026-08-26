@@ -30,6 +30,7 @@
     <nav class="tabs" role="tablist">
       <button class="tab is-active" data-view="box" role="tab">📚 資料箱</button>
       <button class="tab" data-view="create" role="tab">✍️ 資料をつくる</button>
+      <button class="tab" data-view="failure" role="tab">🧯 失敗談を書く</button>
       <button class="tab" data-view="upload" role="tab">📎 そのままアップロード</button>
     </nav>
 
@@ -44,6 +45,7 @@
             <option value="title">タイトル順</option>
           </select>
         </div>
+        <div id="kind-chips" class="chips chips-sub"></div>
         <div id="chips" class="chips"></div>
         <div id="doc-list" class="cards"></div>
         <p id="empty-box" class="empty" hidden>
@@ -133,6 +135,78 @@
         </div>
       </section>
 
+      <!-- 失敗談フォーム -->
+      <section id="view-failure" class="view">
+        <div class="panel">
+          <h2>失敗談を記録する</h2>
+          <p class="hint">
+            うまくいかなかったことこそ、次の人にとって一番役に立ちます。
+            「問い → 候補 → 試したこと → 失敗 → 理由 → 判断 → 結果」の順に埋めてください。
+            <strong>分からない項目は空欄のままで構いません</strong>（資料には「不明（未記録）」と残ります。推測で埋めないでください）。
+          </p>
+          <form id="failure-form" class="form">
+            <div class="grid-2">
+              <label class="field">
+                <span>タイトル<em>（空欄なら失敗の症状から作ります）</em></span>
+                <input name="title" type="text" placeholder="例: コロニーが出ない原因の切り分けで1週間溶かした" />
+              </label>
+              <label class="field">
+                <span>いつの話か<em>（任意）</em></span>
+                <input name="occurredOn" type="date" />
+              </label>
+            </div>
+
+            <div id="failure-fields"></div>
+
+            <div class="grid-2">
+              <label class="field">
+                <span>どちら向けの話か</span>
+                <select name="track" id="failure-track"></select>
+              </label>
+              <label class="field">
+                <span>想定読者</span>
+                <select name="level" id="failure-level"></select>
+              </label>
+            </div>
+
+            <div class="grid-2">
+              <label class="field">
+                <span>カテゴリ</span>
+                <select name="category" id="failure-category">
+                  <option value="">🤖 自動で分類する</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>タグ<em>（任意・カンマ区切り）</em></span>
+                <input name="tags" type="text" placeholder="大腸菌, 形質転換" />
+              </label>
+            </div>
+
+            <div class="field">
+              <span>出典（原文へのリンク）<em>Slackの投稿・Boxのファイル・録音など。あとで原文に戻れるようにします</em></span>
+              <div id="failure-sources" class="source-rows"></div>
+              <div class="actions">
+                <button type="button" id="add-source" class="btn">＋ 出典を追加</button>
+              </div>
+            </div>
+
+            <label class="field">
+              <span>関連する記録<em>（同じ意思決定の続きなら選ぶ。あとで束ねて追えるようになります）</em></span>
+              <select id="failure-related">
+                <option value="">なし（新しい記録）</option>
+              </select>
+            </label>
+
+            <div class="actions">
+              <button type="submit" class="btn btn-primary">🧯 記録して資料にする</button>
+            </div>
+            <p class="hint">
+              投稿すると<strong>「承認待ち」</strong>として保存されます。上級生が承認するまで、教材としては公開されません。
+            </p>
+          </form>
+        </div>
+      </section>
+
       <!-- そのままアップロード -->
       <section id="view-upload" class="view">
         <div class="panel">
@@ -196,8 +270,11 @@
         </div>
         <div id="detail-body" class="detail-body markdown"></div>
         <div id="detail-attachments" class="attachments"></div>
+        <div id="detail-sources" class="sources-block" hidden></div>
+        <div id="detail-related" class="related-block" hidden></div>
         <div id="detail-edit" class="edit-area" hidden></div>
         <div class="detail-actions">
+          <button type="button" id="btn-approve" class="btn" hidden>✅ 承認する（上級生）</button>
           <button type="button" id="btn-edit" class="btn">✏️ 編集</button>
           <button type="button" id="btn-reclassify" class="btn">🤖 分類しなおす</button>
           <button type="button" id="btn-download" class="btn">⬇️ Markdownで保存</button>

@@ -19,6 +19,18 @@ import { classifyByRules, excerptOf, deriveTitle } from './classify.js';
 import { autoClassify } from './auto-classify.js';
 import { generateDocument } from './ai.js';
 import { buildDocumentPrompt } from './prompts.js';
+import {
+  FAILURE_FIELDS,
+  CAUSE_CONFIDENCE,
+  TRACKS,
+  LEVELS,
+  SOURCE_KINDS,
+  STATUSES,
+  normalizeFailure,
+  buildFailureMarkdown,
+  failureTitle,
+  failureSearchText,
+} from './failure.js';
 
 ensureDirs();
 
@@ -90,15 +102,22 @@ app.get('/api/config', (_req, res) => {
     categories: CATEGORIES,
     maxFileSize: MAX_FILE_SIZE,
     maxFiles: MAX_FILES,
+    failure: { fields: FAILURE_FIELDS, causeConfidence: CAUSE_CONFIDENCE, tracks: TRACKS, levels: LEVELS, sourceKinds: SOURCE_KINDS, statuses: STATUSES },
+    approvalRequired: Boolean(process.env.APPROVER_TOKEN),
   });
 });
 
 // 資料一覧（検索・絞り込み込み）
 app.get('/api/documents', (req, res) => {
-  const { q = '', category = '', tag = '', sort = 'new' } = req.query;
+  const { q = '', category = '', tag = '', sort = 'new', kind = '', status = '', track = '', level = '', decisionId = '' } = req.query;
   const needle = String(q).trim().toLowerCase();
   let docs = listDocuments();
 
+  if (kind) docs = docs.filter((d) => (d.kind || 'doc') === kind);
+  if (status) docs = docs.filter((d) => docStatus(d) === status);
+  if (track) docs = docs.filter((d) => (d.track || 'both') === track || (d.track || 'both') === 'both');
+  if (level) docs = docs.filter((d) => (d.level || 'all') === level || (d.level || 'all') === 'all');
+  if (decisionId) docs = docs.filter((d) => d.decisionId === decisionId);
   if (category && isValidCategory(String(category))) {
     docs = docs.filter((d) => d.category === category);
   }
@@ -123,15 +142,36 @@ app.get('/api/documents', (req, res) => {
   // ピン留めした資料は常に先頭。
   docs = [...docs.filter((d) => d.pinned), ...docs.filter((d) => !d.pinned)];
 
+  const all = listDocuments();
   const counts = Object.fromEntries(CATEGORIES.map((c) => [c.id, 0]));
-  for (const doc of listDocuments()) counts[doc.category] = (counts[doc.category] || 0) + 1;
+  for (const doc of all) counts[doc.category] = (counts[doc.category] || 0) + 1;
 
   res.json({
     documents: docs.map(({ body, ...rest }) => ({ ...rest, excerpt: rest.summary || excerptOf(body) })),
     counts,
-    total: listDocuments().length,
+    total: all.length,
+    kinds: {
+      doc: all.filter((d) => (d.kind || 'doc') === 'doc').length,
+      failure: all.filter((d) => d.kind === 'failure').length,
+      pending: all.filter((d) => docStatus(d) === 'draft').length,
+    },
   });
 });
+
+/** 失敗談は承認されるまで下書き。従来の資料は最初から参照可。 */
+function docStatus(doc) {
+  return doc.status || (doc.kind === 'failure' ? 'draft' : 'approved');
+}
+
+function parseJsonField(raw, fallback) {
+  if (raw === undefined || raw === null || raw === '') return fallback;
+  if (typeof raw !== 'string') return raw;
+  try {
+    return JSON.parse(raw);
+  } catch (err) {
+    return fallback;
+  }
+}
 
 app.get('/api/documents/:id', (req, res) => {
   const doc = getDocument(req.params.id);
@@ -176,7 +216,7 @@ app.post(
   upload.array('files', MAX_FILES),
   asyncRoute(async (req, res) => {
     const files = req.files || [];
-    const mode = req.body.mode === 'ai' ? 'ai' : 'manual';
+    const mode = ['ai', 'failure'].includes(req.body.mode) ? req.body.mode : 'manual';
     const title = String(req.body.title || '').trim();
     const memo = String(req.body.memo || '').trim();
     const author = String(req.body.author || '').trim();
@@ -192,12 +232,30 @@ app.post(
       return res.status(400).json({ error: '本文かファイルのどちらかは必要です' });
     }
 
+    // 失敗談は構造化フォームからの投稿。入力された事実だけで資料を組み立てる。
+    const failure =
+      mode === 'failure'
+        ? normalizeFailure({
+            fields: parseJsonField(req.body.fields, {}),
+            sources: parseJsonField(req.body.sources, []),
+            track: req.body.track,
+            level: req.body.level,
+            occurredOn: req.body.occurredOn,
+          })
+        : null;
+    if (failure && !failure.fields.failure) {
+      cleanupFiles(files);
+      return res.status(400).json({ error: '「起きた失敗・症状」は必須です' });
+    }
+
     const attachments = files.map(toAttachment);
     const forAi = attachments.map((att) => ({ name: att.name, mime: att.mime, path: attachmentPath(att) }));
 
     let body;
     try {
-      if (mode === 'ai') {
+      if (mode === 'failure') {
+        body = buildFailureMarkdown({ ...failure, title, author });
+      } else if (mode === 'ai') {
         body = await generateDocument({ title, memo, author, tags: inputTags, files: forAi });
       } else {
         body = String(req.body.body || '').trim() || memo;
@@ -217,11 +275,22 @@ app.post(
             confidence: 1,
             classifiedBy: 'manual',
           }
-        : await autoClassify({ title, body, extra: memo, fileNames, tags: inputTags, files: forAi });
+        : await autoClassify({
+            title,
+            body: failure ? failureSearchText(failure) : body,
+            extra: memo,
+            fileNames,
+            tags: inputTags,
+            files: forAi,
+          });
 
     // ファイルを置いただけの資料はファイル名を、本文がある資料は見出しをタイトルに使う。
-    const hasWrittenBody = Boolean(String(req.body.body || '').trim()) || mode === 'ai';
+    const hasWrittenBody = Boolean(String(req.body.body || '').trim()) || mode === 'ai' || mode === 'failure';
     const fallbackTitle = hasWrittenBody ? deriveTitle(body) : fileNames[0] || deriveTitle(body);
+
+    // 同じ意思決定の記録どうしを、あとから束ねられるようにIDでつなぐ。
+    const decisionRef = String(req.body.decisionRef || '').trim();
+    const relatedDoc = decisionRef ? getDocument(decisionRef) : null;
 
     const now = new Date().toISOString();
     const doc = {
@@ -235,12 +304,28 @@ app.post(
       classifiedBy: classification.classifiedBy,
       tags: [...new Set([...inputTags, ...(classification.tags || [])])].slice(0, 10),
       attachments,
-      source: mode === 'ai' ? 'ai' : files.length && !hasWrittenBody ? 'upload' : 'manual',
+      source: mode === 'ai' ? 'ai' : mode === 'failure' ? 'form' : files.length && !hasWrittenBody ? 'upload' : 'manual',
       author,
       pinned: false,
       createdAt: now,
       updatedAt: now,
     };
+
+    if (mode === 'failure') {
+      doc.kind = 'failure';
+      doc.title = title || failureTitle(title, failure.fields);
+      // 承認されるまでは教材として扱わない。
+      doc.status = 'draft';
+      doc.approvedBy = '';
+      doc.approvedAt = '';
+      doc.fields = failure.fields;
+      doc.sources = failure.sources;
+      doc.track = failure.track;
+      doc.level = failure.level;
+      doc.occurredOn = failure.occurredOn;
+      doc.aiNotes = [];
+      doc.decisionId = (relatedDoc && (relatedDoc.decisionId || relatedDoc.id)) || doc.id;
+    }
 
     insertDocument(doc);
     res.status(201).json(doc);
@@ -298,6 +383,29 @@ app.post(
     );
   }),
 );
+
+/** 上級生の承認。承認されるまで教材として公開しない。 */
+app.post('/api/documents/:id/approve', (req, res) => {
+  const doc = getDocument(req.params.id);
+  if (!doc) return res.status(404).json({ error: '資料が見つかりません' });
+
+  const required = process.env.APPROVER_TOKEN || '';
+  if (required && String(req.body.approverToken || '') !== required) {
+    return res.status(403).json({ error: '承認用の合言葉が違います' });
+  }
+
+  const approve = req.body.approve !== false;
+  const approvedBy = String(req.body.approvedBy || '').trim();
+  if (approve && !approvedBy) return res.status(400).json({ error: '承認者の名前を入力してください' });
+
+  res.json(
+    updateDocument(doc.id, {
+      status: approve ? 'approved' : 'draft',
+      approvedBy: approve ? approvedBy : '',
+      approvedAt: approve ? new Date().toISOString() : '',
+    }),
+  );
+});
 
 app.delete('/api/documents/:id', (req, res) => {
   const removed = deleteDocument(req.params.id);

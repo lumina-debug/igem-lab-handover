@@ -127,8 +127,12 @@
 
   async function toFormData(input) {
     const form = new FormData();
-    for (const key of ['mode', 'title', 'memo', 'tags', 'category', 'author', 'body']) {
+    for (const key of ['mode', 'title', 'memo', 'tags', 'category', 'author', 'body', 'track', 'level', 'occurredOn', 'decisionRef']) {
       if (input[key] !== undefined) form.set(key, input[key]);
+    }
+    // 失敗談の構造化データは JSON にして載せる（multipart は文字列しか運べない）
+    for (const key of ['fields', 'sources']) {
+      if (input[key] !== undefined) form.set(key, JSON.stringify(input[key]));
     }
     for (const file of await prepareFiles(input.files)) form.append('files', file);
     return form;
@@ -192,6 +196,16 @@
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(patch),
+      });
+    },
+
+    /** 上級生の承認（承認されるまで教材として公開しない） */
+    async approve(id, payload) {
+      if (isDrive()) return (await drive('approve', Object.assign({ id }, payload))).document;
+      return local(`/api/documents/${id}/approve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
       });
     },
 

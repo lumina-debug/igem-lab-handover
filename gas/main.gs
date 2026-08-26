@@ -73,6 +73,8 @@ function handle_(request) {
         return json_({ document: withLock_(() => updateDocument_(request)) });
       case 'reclassify':
         return json_({ document: withLock_(() => reclassifyDocument_(request)) });
+      case 'approve':
+        return json_({ document: withLock_(() => approveDocument_(request)) });
       case 'delete':
         return json_(withLock_(() => deleteDocument_(request)));
       case 'rebuildIndex':
@@ -108,6 +110,15 @@ function configPayload_() {
     maxFiles: MAX_FILES_GAS,
     maxFileSize: MAX_FILE_SIZE_GAS,
     requiresToken: Boolean(prop_('ACCESS_TOKEN', '')),
+    approvalRequired: Boolean(prop_('APPROVER_TOKEN', '')),
+    failure: {
+      fields: FAILURE_FIELDS,
+      causeConfidence: CAUSE_CONFIDENCE,
+      tracks: TRACKS,
+      levels: LEVELS,
+      sourceKinds: SOURCE_KINDS,
+      statuses: STATUSES,
+    },
     backend: 'gas',
     folderUrl: rootFolder_().getUrl(),
   };
@@ -207,7 +218,18 @@ function listDocuments_(request) {
   const tag = String(request.tag || '').toLowerCase();
   const sort = String(request.sort || 'new');
 
+  const kind = String(request.kind || '');
+  const status = String(request.status || '');
+  const track = String(request.track || '');
+  const level = String(request.level || '');
+  const decisionId = String(request.decisionId || '');
+
   let documents = all.slice();
+  if (kind) documents = documents.filter((d) => (d.kind || 'doc') === kind);
+  if (status) documents = documents.filter((d) => docStatus_(d) === status);
+  if (track) documents = documents.filter((d) => (d.track || 'both') === track || (d.track || 'both') === 'both');
+  if (level) documents = documents.filter((d) => (d.level || 'all') === level || (d.level || 'all') === 'all');
+  if (decisionId) documents = documents.filter((d) => d.decisionId === decisionId);
   if (category) documents = documents.filter((d) => d.category === category);
   if (tag) documents = documents.filter((d) => (d.tags || []).some((t) => String(t).toLowerCase() === tag));
   if (needle) {
@@ -234,11 +256,46 @@ function listDocuments_(request) {
     counts[d.category] = (counts[d.category] || 0) + 1;
   });
 
+  const kindCounts = { doc: 0, failure: 0, pending: 0 };
+  all.forEach((d) => {
+    kindCounts[(d.kind || 'doc') === 'failure' ? 'failure' : 'doc'] += 1;
+    if (docStatus_(d) === 'draft') kindCounts.pending += 1;
+  });
+
   return {
     documents: documents.map((d) => Object.assign({}, d, { excerpt: d.summary || '' })),
     counts,
     total: all.length,
+    kinds: kindCounts,
   };
+}
+
+/** 失敗談は承認されるまで下書き。従来の資料は最初から参照可。 */
+function docStatus_(doc) {
+  return doc.status || (doc.kind === 'failure' ? 'draft' : 'approved');
+}
+
+/** 上級生の承認。承認されるまで教材として公開しない。 */
+function approveDocument_(request) {
+  const holder = metaOf_(String(request.id || ''));
+  const meta = holder.meta;
+  const required = prop_('APPROVER_TOKEN', '');
+  if (required && String(request.approverToken || '') !== required) {
+    throw new Error('承認用の合言葉が違います');
+  }
+  const approve = request.approve !== false;
+  const approvedBy = String(request.approvedBy || '').trim();
+  if (approve && !approvedBy) throw new Error('承認者の名前を入力してください');
+
+  meta.status = approve ? 'approved' : 'draft';
+  meta.approvedBy = approve ? approvedBy : '';
+  meta.approvedAt = approve ? new Date().toISOString() : '';
+  meta.updatedAt = new Date().toISOString();
+
+  const folder = DriveApp.getFolderById(meta.folderId);
+  persistMeta_(holder.root, holder.index, meta, folder);
+  const docFile = fileByName_(folder, DOC_FILE);
+  return Object.assign({}, meta, { body: docFile ? docFile.getBlob().getDataAsString('UTF-8') : '' });
 }
 
 function parseTags_(raw) {
@@ -324,7 +381,7 @@ function linkDriveFiles_(folder, resolved) {
 
 function createDocument_(request) {
   const root = rootFolder_();
-  const mode = request.mode === 'ai' ? 'ai' : 'manual';
+  const mode = request.mode === 'ai' || request.mode === 'failure' ? request.mode : 'manual';
   const title = String(request.title || '').trim();
   const memo = String(request.memo || '').trim();
   const author = String(request.author || '').trim();
@@ -334,20 +391,45 @@ function createDocument_(request) {
   const linkedFiles = resolveDriveFiles_(request.driveFiles);
   const writtenBody = String(request.body || '').trim();
 
+  // 失敗談は構造化フォームからの投稿。入力された事実だけで資料を組み立てる。
+  const failure =
+    mode === 'failure'
+      ? normalizeFailure({
+          fields: request.fields || {},
+          sources: request.sources || [],
+          track: request.track,
+          level: request.level,
+          occurredOn: request.occurredOn,
+        })
+      : null;
+  if (failure && !failure.fields.failure) throw new Error('「起きた失敗・症状」は必須です');
+
   if (mode === 'ai' && !memo) throw new Error('引継ぎメモを入力してください');
   if (mode === 'manual' && !writtenBody && !memo && files.length === 0 && linkedFiles.length === 0) {
     throw new Error('本文かファイルのどちらかは必要です');
   }
 
-  const body = mode === 'ai' ? generateDocumentGas_(title, memo, author, inputTags, files) : writtenBody || memo;
+  const body =
+    mode === 'failure'
+      ? buildFailureMarkdown(Object.assign({}, failure, { title: title, author: author }))
+      : mode === 'ai'
+        ? generateDocumentGas_(title, memo, author, inputTags, files)
+        : writtenBody || memo;
   const fileNames = files.map((f) => String(f.name || '')).concat(linkedFiles.map((f) => f.name));
   const known = CATEGORIES.some((c) => c.id === requested);
   const classification = known
     ? { category: requested, tags: [], summary: excerptOf(body), confidence: 1, classifiedBy: 'manual' }
-    : autoClassifyGas_({ title: title, body: body, extra: memo, fileNames: fileNames, tags: inputTags, files: files });
+    : autoClassifyGas_({
+        title: title,
+        body: failure ? failureSearchText(failure) : body,
+        extra: memo,
+        fileNames: fileNames,
+        tags: inputTags,
+        files: files,
+      });
 
   const id = Utilities.getUuid().replace(/-/g, '').slice(0, 12);
-  const hasWrittenBody = Boolean(writtenBody) || mode === 'ai';
+  const hasWrittenBody = Boolean(writtenBody) || mode === 'ai' || mode === 'failure';
   const fallbackTitle = hasWrittenBody ? deriveTitle(body) : fileNames[0] || deriveTitle(body);
   const finalTitle = title || fallbackTitle || '無題の資料';
 
@@ -361,6 +443,15 @@ function createDocument_(request) {
   inputTags.concat(classification.tags || []).forEach((t) => {
     if (t && tags.indexOf(t) === -1) tags.push(t);
   });
+
+  const relatedId = String(request.decisionRef || '').trim();
+  let relatedDecision = '';
+  if (relatedId) {
+    const related = readIndex_(root).documents.filter(function (d) {
+      return d.id === relatedId;
+    })[0];
+    relatedDecision = (related && (related.decisionId || related.id)) || '';
+  }
 
   const meta = {
     id: id,
@@ -380,6 +471,23 @@ function createDocument_(request) {
     folderId: folder.getId(),
     folderUrl: folder.getUrl(),
   };
+
+  if (mode === 'failure') {
+    meta.kind = 'failure';
+    meta.title = title || failureTitle(title, failure.fields);
+    meta.status = 'draft'; // 承認されるまで教材として扱わない
+    meta.approvedBy = '';
+    meta.approvedAt = '';
+    meta.fields = failure.fields;
+    meta.sources = failure.sources;
+    meta.track = failure.track;
+    meta.level = failure.level;
+    meta.occurredOn = failure.occurredOn;
+    meta.aiNotes = [];
+    meta.decisionId = relatedDecision || id;
+    meta.source = 'form';
+    folder.setName(folderName_(meta.title, id));
+  }
   writeTextFile_(folder, META_FILE, JSON.stringify(meta, null, 2), 'application/json');
 
   const index = readIndex_(root);

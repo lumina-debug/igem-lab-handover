@@ -9,7 +9,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const sources = ['server/categories.js', 'server/classify.js', 'server/prompts.js'];
+const sources = ['server/categories.js', 'server/classify.js', 'server/prompts.js', 'server/failure.js'];
 const out = path.join(root, 'gas', 'shared.gs');
 
 const header = `/*

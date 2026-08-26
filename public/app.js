@@ -1,7 +1,7 @@
 /* 引継ぎ資料箱 フロントエンド（依存なし） */
 const state = {
   config: { aiEnabled: false, categories: [], maxFiles: 12, maxFileSize: 0 },
-  filters: { q: '', category: '', tag: '', sort: 'new' },
+  filters: { q: '', category: '', tag: '', sort: 'new', kind: '', status: '' },
   counts: {},
   total: 0,
   current: null,
@@ -13,7 +13,23 @@ const $$ = (sel) => [...document.querySelectorAll(sel)];
 const esc = (s) => window.markdown.escapeHtml(s ?? '');
 
 const CLASSIFIER_LABEL = { ai: 'AIが分類', rule: 'キーワードで分類', manual: '人が指定' };
-const SOURCE_LABEL = { ai: 'AI生成', manual: '手入力', upload: 'アップロード' };
+const SOURCE_LABEL = { ai: 'AI生成', manual: '手入力', upload: 'アップロード', form: '失敗談フォーム' };
+
+/** 失敗談は承認されるまで下書き。従来の資料は最初から参照できる。 */
+function statusOf(doc) {
+  return doc.status || (doc.kind === 'failure' ? 'draft' : 'approved');
+}
+
+function optionList(list, selected) {
+  return list
+    .map((item) => `<option value="${item.id}" ${item.id === selected ? 'selected' : ''}>${esc(item.label)}</option>`)
+    .join('');
+}
+
+function labelIn(list, id, fallback = '') {
+  const hit = (list || []).find((item) => item.id === id);
+  return hit ? hit.label : fallback;
+}
 
 /* ---------- 共通UI ---------- */
 let toastTimer = null;
@@ -216,6 +232,12 @@ function cardHtml(doc) {
         <span class="cat-badge" style="--cat:${cat.color}">${cat.emoji} ${esc(cat.label)}</span>
         ${doc.pinned ? '<span class="pin">📌</span>' : ''}
       </div>
+      ${doc.kind === 'failure' ? `<div class="tag-row">
+        <span class="audience-badge">🧯 失敗談</span>
+        ${statusOf(doc) === 'draft' ? '<span class="audience-badge" style="color:#b45309">📝 承認待ち</span>' : '<span class="audience-badge" style="color:#047857">✅ 承認済み</span>'}
+        ${doc.track && doc.track !== 'both' ? `<span class="audience-badge">${doc.track === 'wet' ? 'Wet' : 'Dry'}</span>` : ''}
+        ${doc.level && doc.level !== 'all' ? `<span class="audience-badge">${esc(doc.level.toUpperCase())}向け</span>` : ''}
+      </div>` : ''}
       <h3>${esc(doc.title)}</h3>
       <p class="card-excerpt">${esc(doc.excerpt || '')}</p>
       <div class="tag-row">${(doc.tags || []).map((t) => `<span class="tag">#${esc(t)}</span>`).join('')}</div>
@@ -230,8 +252,24 @@ function cardHtml(doc) {
   </article>`;
 }
 
+function renderKindChips(kinds = {}) {
+  const chip = (key, value, label, count) =>
+    `<button class="chip ${state.filters[key] === value ? 'is-active' : ''}" data-kind-filter="${key}" data-value="${value}">
+      ${label}${count === undefined ? '' : ` <b>${count}</b>`}
+    </button>`;
+  $('#kind-chips').innerHTML = [
+    chip('kind', '', 'すべての記録'),
+    chip('kind', 'failure', '🧯 失敗談', kinds.failure ?? 0),
+    chip('kind', 'doc', '📄 引継ぎ資料', kinds.doc ?? 0),
+    '<span class="chip-sep"></span>',
+    chip('status', 'approved', '✅ 承認済みだけ'),
+    chip('status', 'draft', '📝 承認待ち', kinds.pending ?? 0),
+  ].join('');
+}
+
 async function loadDocuments() {
   const data = await API.listDocuments(state.filters);
+  renderKindChips(data.kinds || {});
   state.counts = data.counts;
   state.total = data.total;
   renderChips();
@@ -271,8 +309,26 @@ function renderDetail(doc) {
       <span>${CLASSIFIER_LABEL[doc.classifiedBy] || ''} ${Math.round((doc.confidence ?? 0) * 100)}%</span>
     </div>
     <div class="tag-row">${(doc.tags || []).map((t) => `<span class="tag">#${esc(t)}</span>`).join('')}</div>`;
-  $('#detail-body').innerHTML = window.markdown.render(doc.body || '');
+  const status = statusOf(doc);
+  const banner =
+    doc.kind === 'failure'
+      ? status === 'draft'
+        ? `<div class="status-banner status-draft"><span>📝</span><div><strong>承認待ちです。</strong>
+             上級生が内容を確認して承認するまで、この記録は教材として公開されません（内容はいつでも編集できます）。</div></div>`
+        : `<div class="status-banner status-approved"><span>✅</span><div><strong>承認済み</strong>
+             ${doc.approvedBy ? `— ${esc(doc.approvedBy)} が承認（${formatDate(doc.approvedAt)}）` : ''}</div></div>`
+      : '';
+  $('#detail-meta').insertAdjacentHTML('beforeend', banner);
+  // 見出しの h2 と本文冒頭の # タイトルが二重に出ないように、同じなら本文側を落とす。
+  const bodyText = String(doc.body || '').replace(/^#\s+(.+)\n+/, (whole, heading) =>
+    heading.trim() === String(doc.title || '').trim() ? '' : whole,
+  );
+  $('#detail-body').innerHTML = window.markdown.render(bodyText);
   $('#detail-attachments').innerHTML = (doc.attachments || []).map(attachmentHtml).join('');
+  renderSources(doc);
+  renderRelated(doc);
+  $('#btn-approve').hidden = doc.kind !== 'failure';
+  $('#btn-approve').textContent = status === 'draft' ? '✅ 承認する（上級生）' : '↩️ 承認を取り消す';
   $('#btn-pin').textContent = doc.pinned ? '📌 ピン留めを外す' : '📌 ピン留め';
   $('#btn-edit').textContent = '✏️ 編集';
   state.editing = false;
@@ -328,6 +384,102 @@ function closeDetail() {
   $('#detail').hidden = true;
   document.body.classList.remove('is-locked');
   state.current = null;
+}
+
+function renderSources(doc) {
+  const sources = doc.sources || [];
+  const kinds = state.config.failure?.sourceKinds || [];
+  $('#detail-sources').innerHTML = sources.length
+    ? `<h3>出典（原文）</h3><ul>${sources
+        .map((source) => {
+          const label = labelIn(kinds, source.kind, 'リンク');
+          const note = source.note ? ` — ${esc(source.note)}` : '';
+          return source.url
+            ? `<li>${esc(label)}: <a href="${esc(source.url)}" target="_blank" rel="noopener">${esc(source.url)}</a>${note}</li>`
+            : `<li>${esc(label)}: （URLなし）${note}</li>`;
+        })
+        .join('')}</ul>`
+    : doc.kind === 'failure'
+      ? '<h3>出典（原文）</h3><ul><li>不明（未記録）</li></ul>'
+      : '';
+  $('#detail-sources').hidden = !$('#detail-sources').innerHTML;
+}
+
+/** 同じ意思決定につながる記録をたどれるようにする。 */
+async function renderRelated(doc) {
+  const box = $('#detail-related');
+  box.innerHTML = '';
+  box.hidden = true;
+  if (!doc.decisionId) return;
+  try {
+    const data = await API.listDocuments({ decisionId: doc.decisionId, sort: 'old' });
+    const others = data.documents.filter((d) => d.id !== doc.id);
+    if (!others.length) return;
+    box.innerHTML = `<strong>同じ意思決定の記録（${others.length}件）</strong><ul>${others
+      .map((d) => `<li><a data-open="${d.id}">${esc(d.title)}</a>（${formatDate(d.createdAt)}）</li>`)
+      .join('')}</ul>`;
+    box.hidden = false;
+  } catch (err) {
+    // 関連の取得に失敗しても本体の表示は妨げない
+  }
+}
+
+/* ---------- 失敗談フォーム ---------- */
+function renderFailureForm() {
+  const cfg = state.config.failure;
+  if (!cfg) return;
+  $('#failure-fields').innerHTML = cfg.fields
+    .map((field) => {
+      const label = `<label class="field">
+        <span>${esc(field.label)}${field.required ? '<em class="req">必須</em>' : '<em>（分からなければ空欄のまま）</em>'}</span>
+        <textarea name="${field.id}" rows="${field.rows || 2}" placeholder="${esc(field.hint || '')}"></textarea>
+      </label>`;
+      // 「失敗の理由」の直後で、それが事実か推測かを必ず選ばせる。
+      const confidence =
+        field.id === 'cause'
+          ? `<label class="field">
+              <span>その理由はどこまで確か？<em>資料に明記され、あとでAIの推測と混ざらないようにするためです</em></span>
+              <select name="causeConfidence">${optionList(cfg.causeConfidence, 'unknown')}</select>
+            </label>`
+          : '';
+      return label + confidence;
+    })
+    .join('');
+  $('#failure-track').innerHTML = optionList(cfg.tracks, 'both');
+  $('#failure-level').innerHTML = optionList(cfg.levels, 'all');
+}
+
+function addSourceRow(preset = {}) {
+  const kinds = state.config.failure?.sourceKinds || [];
+  const row = document.createElement('div');
+  row.className = 'source-row';
+  row.innerHTML = `
+    <select class="source-kind">${optionList(kinds, preset.kind || 'slack')}</select>
+    <input class="source-url" type="url" placeholder="https://…（Slackの投稿リンクなど）" value="${esc(preset.url || '')}" />
+    <input class="source-note" type="text" placeholder="補足（例: 3/12の相談スレッド、録音 12:30〜）" value="${esc(preset.note || '')}" />
+    <button type="button" class="icon-btn source-remove" aria-label="この出典を削除">✕</button>`;
+  $('#failure-sources').appendChild(row);
+}
+
+function collectSources() {
+  return [...$('#failure-sources').querySelectorAll('.source-row')]
+    .map((row) => ({
+      kind: row.querySelector('.source-kind').value,
+      url: row.querySelector('.source-url').value.trim(),
+      note: row.querySelector('.source-note').value.trim(),
+    }))
+    .filter((source) => source.url || source.note);
+}
+
+async function refreshRelatedOptions() {
+  try {
+    const data = await API.listDocuments({ kind: 'failure', sort: 'new' });
+    $('#failure-related').innerHTML =
+      '<option value="">なし（新しい記録）</option>' +
+      data.documents.map((d) => `<option value="${d.id}">${esc(d.title)}</option>`).join('');
+  } catch (err) {
+    // 関連候補が取れなくても投稿はできる
+  }
 }
 
 /* ---------- 作成フロー ---------- */
@@ -428,6 +580,9 @@ function applyConfig() {
     $(id).innerHTML = `<option value="">🤖 自動で分類する</option>${options}`;
   }
 
+  renderFailureForm();
+  if (!$('#failure-sources').children.length) addSourceRow();
+
   const badge = $('#ai-badge');
   if (state.config.aiEnabled) {
     badge.textContent = '🤖 AI 有効';
@@ -471,6 +626,102 @@ async function init() {
     state.filters.sort = e.target.value;
     loadDocuments().catch((err) => toast(err.message, 'error'));
   });
+  $('#kind-chips').addEventListener('click', (event) => {
+    const chip = event.target.closest('.chip');
+    if (!chip) return;
+    const key = chip.dataset.kindFilter;
+    // 同じチップをもう一度押したら解除する。
+    state.filters[key] = state.filters[key] === chip.dataset.value ? '' : chip.dataset.value;
+    loadDocuments().catch((err) => toast(err.message, 'error'));
+  });
+  $('#detail-related').addEventListener('click', async (event) => {
+    const link = event.target.closest('[data-open]');
+    if (!link) return;
+    try {
+      renderDetail(await API.getDocument(link.dataset.open));
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  });
+  $('#failure-sources').addEventListener('click', (event) => {
+    if (event.target.closest('.source-remove')) event.target.closest('.source-row').remove();
+  });
+  $('#add-source').addEventListener('click', () => addSourceRow());
+
+  // 失敗談の投稿
+  $('#failure-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = event.target;
+    const cfg = state.config.failure;
+    const fields = {};
+    cfg.fields.forEach((field) => {
+      fields[field.id] = form.elements[field.id].value.trim();
+    });
+    fields.causeConfidence = form.elements.causeConfidence.value;
+    if (!fields.failure) return toast('「起きた失敗・症状」だけは埋めてください', 'warn');
+
+    try {
+      loading(true, '記録を資料にしています…');
+      const doc = await API.createDocument(
+        {
+          mode: 'failure',
+          title: form.elements.title.value.trim(),
+          tags: form.elements.tags.value.trim(),
+          category: form.elements.category.value,
+          author: $('#author').value.trim(),
+          occurredOn: form.elements.occurredOn.value,
+          track: form.elements.track.value,
+          level: form.elements.level.value,
+          decisionRef: $('#failure-related').value,
+          fields,
+          sources: collectSources(),
+          files: [],
+        },
+        createOptions(),
+      );
+      form.reset();
+      renderFailureForm();
+      $('#failure-sources').innerHTML = '';
+      addSourceRow();
+      await loadDocuments();
+      await refreshRelatedOptions();
+      switchView('box');
+      renderDetail(doc);
+      toast('記録しました。上級生の承認を待っています。');
+    } catch (err) {
+      toast(err.message, 'error');
+    } finally {
+      loading(false);
+    }
+  });
+
+  // 上級生による承認 / 取り消し
+  $('#btn-approve').addEventListener('click', async () => {
+    const doc = state.current;
+    const approve = statusOf(doc) === 'draft';
+    let approvedBy = '';
+    if (approve) {
+      approvedBy = (prompt('承認する上級生の名前を入力してください', $('#author').value.trim()) || '').trim();
+      if (!approvedBy) return;
+    }
+    let approverToken = '';
+    if (state.config.approvalRequired) {
+      approverToken = (prompt('承認用の合言葉を入力してください') || '').trim();
+      if (!approverToken) return;
+    }
+    try {
+      loading(true, approve ? '承認しています…' : '承認を取り消しています…');
+      const updated = await API.approve(doc.id, { approve, approvedBy, approverToken });
+      renderDetail(updated);
+      await loadDocuments();
+      toast(approve ? '承認しました。教材として公開されます。' : '承認を取り消しました。');
+    } catch (err) {
+      toast(err.message, 'error');
+    } finally {
+      loading(false);
+    }
+  });
+
   $('#chips').addEventListener('click', (event) => {
     const chip = event.target.closest('.chip');
     if (!chip) return;
@@ -649,6 +900,7 @@ async function init() {
   });
 
   await loadDocuments();
+  await refreshRelatedOptions();
 }
 
 let booted = false;
