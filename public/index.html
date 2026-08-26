@@ -17,7 +17,9 @@
         </div>
       </div>
       <div class="topbar-right">
+        <span id="store-badge" class="badge" title="資料の保存先">…</span>
         <span id="ai-badge" class="badge" title="AIの利用状況">…</span>
+        <button type="button" id="btn-settings" class="icon-btn" title="保存先の設定" aria-label="保存先の設定">⚙️</button>
         <label class="author-field">
           <span>あなたの名前</span>
           <input id="author" type="text" placeholder="例: 田中（M2）" autocomplete="name" />
@@ -180,9 +182,35 @@
         <div class="detail-actions">
           <button type="button" id="btn-edit" class="btn">✏️ 編集</button>
           <button type="button" id="btn-reclassify" class="btn">🤖 分類しなおす</button>
-          <a id="btn-download" class="btn" download>⬇️ Markdownで保存</a>
+          <button type="button" id="btn-download" class="btn">⬇️ Markdownで保存</button>
           <button type="button" id="btn-pin" class="btn">📌 ピン留め</button>
           <button type="button" id="btn-delete" class="btn btn-danger">🗑 削除</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="settings" class="overlay" hidden>
+      <div class="detail-panel settings-panel" role="dialog" aria-modal="true">
+        <div class="detail-head">
+          <h2>資料の保存先</h2>
+          <button type="button" id="settings-close" class="icon-btn" aria-label="閉じる">✕</button>
+        </div>
+        <p class="hint">
+          Google Drive に保存すると、サーバーを用意しなくても研究室の全員で同じ資料箱を共有できます。
+          Apps Script の作り方は README の「Google Drive で共有する」を参照してください。
+        </p>
+        <label class="field">
+          <span>Apps Script のウェブアプリURL</span>
+          <input id="settings-url" type="url" placeholder="https://script.google.com/macros/s/……/exec" />
+        </label>
+        <label class="field">
+          <span>合言葉<em>（Apps Script側で ACCESS_TOKEN を設定した場合のみ）</em></span>
+          <input id="settings-token" type="text" placeholder="未設定なら空欄のまま" />
+        </label>
+        <p class="hint" id="settings-status"></p>
+        <div class="actions">
+          <button type="button" id="settings-save" class="btn btn-primary">🔗 接続して保存</button>
+          <button type="button" id="settings-clear" class="btn">このサーバーに戻す</button>
         </div>
       </div>
     </div>
@@ -190,7 +218,9 @@
     <div id="toast" class="toast" hidden></div>
     <div id="loading" class="loading" hidden><div class="spinner"></div><p id="loading-text">処理中…</p></div>
 
+    <script src="/config.js"></script>
     <script src="/markdown.js"></script>
+    <script src="/api-client.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>

@@ -15,7 +15,8 @@ import {
 } from './config.js';
 import { CATEGORIES, isValidCategory, DEFAULT_CATEGORY } from './categories.js';
 import { listDocuments, getDocument, insertDocument, updateDocument, deleteDocument, newId } from './store.js';
-import { autoClassify, classifyByRules, excerptOf } from './classify.js';
+import { classifyByRules, excerptOf, deriveTitle } from './classify.js';
+import { autoClassify } from './auto-classify.js';
 import { generateDocument } from './ai.js';
 import { buildDocumentPrompt } from './prompts.js';
 
@@ -303,13 +304,6 @@ app.delete('/api/documents/:id', (req, res) => {
   if (!removed) return res.status(404).json({ error: '資料が見つかりません' });
   res.json({ ok: true });
 });
-
-function deriveTitle(body) {
-  const heading = String(body || '').match(/^#\s+(.+)$/m);
-  if (heading) return heading[1].trim();
-  const firstLine = String(body || '').split('\n').find((line) => line.trim());
-  return firstLine ? excerptOf(firstLine, 40) : '';
-}
 
 // エラーハンドラ（multerの制限超過もここに来る）
 app.use((err, _req, res, _next) => {

@@ -1,6 +1,8 @@
-import { CATEGORIES, DEFAULT_CATEGORY, isValidCategory } from './categories.js';
-import { AI_ENABLED } from './config.js';
-import { classifyDocument } from './ai.js';
+/*
+ * 依存なしの純粋ロジック。ここは Node（server/）と Google Apps Script（gas/）で共有するため、
+ * import / 外部呼び出しを持ち込まないこと（npm run build:gas がそのまま連結する）。
+ */
+import { CATEGORIES, DEFAULT_CATEGORY } from './categories.js';
 
 function normalize(text) {
   return String(text || '').toLowerCase();
@@ -63,20 +65,12 @@ export function classifyByRules({ title, body, extra = '', fileNames = [], tags 
   return { category: best.category, tags: autoTags, summary: excerptOf(body), confidence };
 }
 
-/**
- * 自動分類の入口。AIが使えればAIで、使えない・失敗したらルールベースで分類する。
- * どちらで分類したかは classifiedBy として資料に残す（後から見直せるように）。
- */
-export async function autoClassify(input) {
-  if (AI_ENABLED) {
-    try {
-      const result = await classifyDocument(input);
-      if (isValidCategory(result.category)) {
-        return { ...result, classifiedBy: 'ai' };
-      }
-    } catch (err) {
-      console.warn('[classify] AI分類に失敗したためルールベースに切り替えます:', err.message);
-    }
-  }
-  return { ...classifyByRules(input), classifiedBy: 'rule' };
+/** 本文の見出し（なければ先頭行）からタイトルを起こす。 */
+export function deriveTitle(body) {
+  const heading = String(body || '').match(/^#\s+(.+)$/m);
+  if (heading) return heading[1].trim();
+  const firstLine = String(body || '')
+    .split('\n')
+    .find((line) => line.trim());
+  return firstLine ? excerptOf(firstLine, 40) : '';
 }

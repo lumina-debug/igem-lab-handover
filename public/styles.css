@@ -319,6 +319,8 @@ main { padding: 20px clamp(16px, 4vw, 40px) 80px; max-width: 1240px; margin: 0 a
   padding: clamp(18px, 3vw, 32px);
   box-shadow: var(--shadow);
 }
+.settings-panel { width: min(560px, 100%); }
+.settings-panel .field { margin-top: 12px; }
 .detail-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
 .detail-head h2 { margin: 8px 0 6px; font-size: 22px; }
 .detail-body { border-top: 1px solid var(--line); margin-top: 16px; padding-top: 8px; }

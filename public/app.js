@@ -33,13 +33,7 @@ function loading(on, text = '処理中…') {
   $('#loading').hidden = !on;
 }
 
-async function api(path, options = {}) {
-  const res = await fetch(path, options);
-  const isJson = (res.headers.get('content-type') || '').includes('application/json');
-  const payload = isJson ? await res.json() : null;
-  if (!res.ok) throw new Error(payload?.error || `通信に失敗しました (${res.status})`);
-  return payload;
-}
+const API = window.hikitsugiApi;
 
 function categoryOf(id) {
   return state.config.categories.find((c) => c.id === id) || { label: '未分類', emoji: '📦', color: '#64748b' };
@@ -148,7 +142,7 @@ function cardHtml(doc) {
   const thumb = attachments.find((a) => a.isImage);
   const confidence = Math.round((doc.confidence ?? 0) * 100);
   return `<article class="card" data-id="${doc.id}" style="--cat:${cat.color}">
-    ${thumb ? `<div class="card-thumb"><img src="${thumb.url}" alt="" loading="lazy" /></div>` : ''}
+    ${thumb ? `<div class="card-thumb"><img src="${thumb.thumbUrl || thumb.url}" alt="" loading="lazy" onerror="this.parentElement.remove()" /></div>` : ''}
     <div class="card-main">
       <div class="card-top">
         <span class="cat-badge" style="--cat:${cat.color}">${cat.emoji} ${esc(cat.label)}</span>
@@ -169,9 +163,7 @@ function cardHtml(doc) {
 }
 
 async function loadDocuments() {
-  const params = new URLSearchParams();
-  for (const [key, value] of Object.entries(state.filters)) if (value) params.set(key, value);
-  const data = await api(`/api/documents?${params}`);
+  const data = await API.listDocuments(state.filters);
   state.counts = data.counts;
   state.total = data.total;
   renderChips();
@@ -188,7 +180,7 @@ async function loadDocuments() {
 function attachmentHtml(att) {
   if (att.isImage) {
     return `<a class="att att-image" href="${att.url}" target="_blank" rel="noopener">
-      <img src="${att.url}" alt="${esc(att.name)}" loading="lazy" />
+      <img src="${att.thumbUrl || att.url}" alt="${esc(att.name)}" loading="lazy" onerror="this.remove()" />
       <span>${esc(att.name)}</span>
     </a>`;
   }
@@ -213,7 +205,6 @@ function renderDetail(doc) {
     <div class="tag-row">${(doc.tags || []).map((t) => `<span class="tag">#${esc(t)}</span>`).join('')}</div>`;
   $('#detail-body').innerHTML = window.markdown.render(doc.body || '');
   $('#detail-attachments').innerHTML = (doc.attachments || []).map(attachmentHtml).join('');
-  $('#btn-download').href = `/api/documents/${doc.id}/markdown`;
   $('#btn-pin').textContent = doc.pinned ? '📌 ピン留めを外す' : '📌 ピン留め';
   $('#btn-edit').textContent = '✏️ 編集';
   state.editing = false;
@@ -248,15 +239,11 @@ function openEditor() {
   $('#edit-save').onclick = async () => {
     try {
       loading(true, '保存中…');
-      const updated = await api(`/api/documents/${doc.id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          title: $('#edit-title').value,
-          body: $('#edit-body').value,
-          tags: $('#edit-tags').value,
-          category: $('#edit-category').value,
-        }),
+      const updated = await API.updateDocument(doc.id, {
+        title: $('#edit-title').value,
+        body: $('#edit-body').value,
+        tags: $('#edit-tags').value,
+        category: $('#edit-category').value,
       });
       renderDetail(updated);
       await loadDocuments();
@@ -287,16 +274,7 @@ function formValues(form) {
 }
 
 function buildPayload(form, picker, extra = {}) {
-  const values = formValues(form);
-  const body = new FormData();
-  body.set('title', values.title);
-  body.set('memo', values.memo);
-  body.set('tags', values.tags);
-  body.set('category', values.category);
-  body.set('author', $('#author').value.trim());
-  for (const [key, value] of Object.entries(extra)) body.set(key, value);
-  for (const file of picker.files()) body.append('files', file);
-  return body;
+  return Object.assign(formValues(form), { author: $('#author').value.trim(), files: picker.files() }, extra);
 }
 
 function switchView(view) {
@@ -304,30 +282,94 @@ function switchView(view) {
   $$('.view').forEach((section) => section.classList.toggle('is-active', section.id === `view-${view}`));
 }
 
-async function init() {
-  state.config = await api('/api/config');
+/* ---------- 保存先の設定 ---------- */
+function renderStoreBadge() {
+  const badge = $('#store-badge');
+  const drive = API.isDrive();
+  badge.textContent = drive ? '🗂 Google Drive' : '💾 このサーバー';
+  badge.className = `badge ${drive ? 'badge-on' : ''}`;
+  badge.title = drive
+    ? `保存先: ${API.endpoint()}`
+    : 'この画面を配信しているサーバーに保存しています（⚙でGoogle Driveに切り替えられます）';
+}
+
+function openSettings(message = '') {
+  $('#settings-url').value = API.isDrive() ? API.endpoint() : '';
+  $('#settings-token').value = localStorage.getItem('hikitsugi.gasToken') || '';
+  $('#settings-status').textContent = message;
+  $('#settings').hidden = false;
+  document.body.classList.add('is-locked');
+}
+
+function closeSettings() {
+  $('#settings').hidden = true;
+  document.body.classList.remove('is-locked');
+}
+
+function wireSettings() {
+  $('#btn-settings').addEventListener('click', () => openSettings());
+  $('#settings-close').addEventListener('click', closeSettings);
+  $('#settings').addEventListener('click', (event) => {
+    if (event.target.id === 'settings') closeSettings();
+  });
+  $('#settings-save').addEventListener('click', async () => {
+    const url = $('#settings-url').value.trim();
+    const pass = $('#settings-token').value.trim();
+    if (!url) return toast('Apps Script のURLを入力してください', 'warn');
+    $('#settings-status').textContent = '接続を確認しています…';
+    try {
+      // 保存する前に必ず疎通を確認する（URLの貼り間違いをそのまま保存しない）。
+      const config = await API.test(url, pass);
+      API.setEndpoint(url, pass);
+      $('#settings-status').textContent = `接続できました（資料の保存先: ${config.folderUrl || 'Google Drive'}）`;
+      closeSettings();
+      await boot();
+      toast('Google Drive に接続しました');
+    } catch (err) {
+      $('#settings-status').textContent = `接続できませんでした: ${err.message}`;
+    }
+  });
+  $('#settings-clear').addEventListener('click', async () => {
+    API.setEndpoint('', '');
+    closeSettings();
+    await boot();
+    toast('このサーバーの保存先に戻しました');
+  });
+}
+
+/** 保存先から受け取った設定を画面に反映する（保存先を切り替えるたびに呼ぶ）。 */
+function applyConfig() {
+  renderStoreBadge();
+  if (state.config.folderUrl) $('#store-badge').title = `保存先フォルダ: ${state.config.folderUrl}`;
 
   const options = state.config.categories
     .map((c) => `<option value="${c.id}">${c.emoji} ${c.label}</option>`)
     .join('');
   for (const id of ['#create-category', '#upload-category']) {
-    $(id).insertAdjacentHTML('beforeend', options);
+    $(id).innerHTML = `<option value="">🤖 自動で分類する</option>${options}`;
   }
 
   const badge = $('#ai-badge');
   if (state.config.aiEnabled) {
-    badge.textContent = `🤖 AI 有効`;
-    badge.classList.add('badge-on');
+    badge.textContent = '🤖 AI 有効';
+    badge.className = 'badge badge-on';
     badge.title = `モデル: ${state.config.model}`;
+    $('#btn-ai').disabled = false;
     $('#ai-hint').textContent = '「AIで資料を作成」は写真も読み取って資料をまとめます。分類もAIが行います。';
   } else {
     badge.textContent = '🔌 AI 未接続';
-    badge.classList.add('badge-off');
-    badge.title = 'ANTHROPIC_API_KEY を設定すると資料の自動生成が使えます';
+    badge.className = 'badge badge-off';
+    badge.title = state.config.backend === 'drive'
+      ? 'Apps Script のスクリプトプロパティに ANTHROPIC_API_KEY を設定すると資料の自動生成が使えます'
+      : 'ANTHROPIC_API_KEY を設定すると資料の自動生成が使えます';
     $('#btn-ai').disabled = true;
     $('#ai-hint').textContent =
       'APIキーが未設定のため「AIで資料を作成」は使えません。「資料作成プロンプトを出力」を使って、お手持ちのAIに貼り付けてください（自動分類はキーワードで動きます）。';
   }
+}
+
+async function init() {
+  applyConfig();
 
   $('#author').value = localStorage.getItem('hikitsugi.author') || '';
   $('#author').addEventListener('change', (e) => localStorage.setItem('hikitsugi.author', e.target.value.trim()));
@@ -372,7 +414,7 @@ async function init() {
     const card = event.target.closest('.card');
     if (!card) return;
     try {
-      renderDetail(await api(`/api/documents/${card.dataset.id}`));
+      renderDetail(await API.getDocument(card.dataset.id));
     } catch (err) {
       toast(err.message, 'error');
     }
@@ -384,10 +426,7 @@ async function init() {
     if (!formValues(form).memo) return toast('引継ぎメモを入力してください', 'warn');
     try {
       loading(true, 'AIが資料を作成しています…（30秒ほどかかることがあります）');
-      const doc = await api('/api/documents', {
-        method: 'POST',
-        body: buildPayload(form, createPicker, { mode: 'ai' }),
-      });
+      const doc = await API.createDocument(buildPayload(form, createPicker, { mode: 'ai' }));
       form.reset();
       createPicker.clear();
       $('#prompt-panel').hidden = true;
@@ -408,16 +447,12 @@ async function init() {
     const values = formValues(form);
     if (!values.memo && !values.title) return toast('タイトルかメモを入力してください', 'warn');
     try {
-      const { prompt } = await api('/api/prompt', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          title: values.title,
-          memo: values.memo,
-          tags: values.tags,
-          author: $('#author').value.trim(),
-          photoNames: createPicker.names(),
-        }),
+      const prompt = await API.buildPrompt({
+        title: values.title,
+        memo: values.memo,
+        tags: values.tags,
+        author: $('#author').value.trim(),
+        photoNames: createPicker.names(),
       });
       $('#prompt-text').textContent = prompt;
       $('#prompt-panel').hidden = false;
@@ -451,10 +486,7 @@ async function init() {
     if (!pasted) return toast('AIが出力したMarkdownを貼り付けてください', 'warn');
     try {
       loading(true, '保存して分類しています…');
-      const doc = await api('/api/documents', {
-        method: 'POST',
-        body: buildPayload(form, createPicker, { mode: 'manual', body: pasted }),
-      });
+      const doc = await API.createDocument(buildPayload(form, createPicker, { mode: 'manual', body: pasted }));
       form.reset();
       createPicker.clear();
       $('#paste-body').value = '';
@@ -477,10 +509,7 @@ async function init() {
     if (uploadPicker.files().length === 0) return toast('ファイルを選択してください', 'warn');
     try {
       loading(true, 'アップロードして分類しています…');
-      const doc = await api('/api/documents', {
-        method: 'POST',
-        body: buildPayload(form, uploadPicker, { mode: 'manual' }),
-      });
+      const doc = await API.createDocument(buildPayload(form, uploadPicker, { mode: 'manual' }));
       form.reset();
       uploadPicker.clear();
       await loadDocuments();
@@ -502,14 +531,11 @@ async function init() {
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape' && !$('#detail').hidden) closeDetail();
   });
+  $('#btn-download').addEventListener('click', () => API.downloadMarkdown(state.current));
   $('#btn-edit').addEventListener('click', () => (state.editing ? renderDetail(state.current) : openEditor()));
   $('#btn-pin').addEventListener('click', async () => {
     try {
-      const updated = await api(`/api/documents/${state.current.id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pinned: !state.current.pinned }),
-      });
+      const updated = await API.updateDocument(state.current.id, { pinned: !state.current.pinned });
       renderDetail(updated);
       await loadDocuments();
     } catch (err) {
@@ -519,7 +545,7 @@ async function init() {
   $('#btn-reclassify').addEventListener('click', async () => {
     try {
       loading(true, '分類しなおしています…');
-      const updated = await api(`/api/documents/${state.current.id}/reclassify`, { method: 'POST' });
+      const updated = await API.reclassify(state.current.id);
       renderDetail(updated);
       await loadDocuments();
       toast(`「${categoryOf(updated.category).label}」に分類しました`);
@@ -532,7 +558,7 @@ async function init() {
   $('#btn-delete').addEventListener('click', async () => {
     if (!confirm(`「${state.current.title}」を削除します。よろしいですか？`)) return;
     try {
-      await api(`/api/documents/${state.current.id}`, { method: 'DELETE' });
+      await API.deleteDocument(state.current.id);
       closeDetail();
       await loadDocuments();
       toast('削除しました');
@@ -544,4 +570,27 @@ async function init() {
   await loadDocuments();
 }
 
-init().catch((err) => toast(err.message, 'error'));
+let booted = false;
+async function boot() {
+  try {
+    state.config = await API.getConfig();
+    if (booted) {
+      // 保存先を切り替えたときは設定と一覧を読み直す。
+      applyConfig();
+      state.filters = { q: '', category: '', tag: '', sort: state.filters.sort };
+      $('#search').value = '';
+      await loadDocuments();
+      return;
+    }
+    await init();
+    booted = true;
+  } catch (err) {
+    renderStoreBadge();
+    $('#ai-badge').textContent = '⚠️ 保存先未接続';
+    $('#ai-badge').className = 'badge badge-off';
+    openSettings(`保存先に接続できませんでした: ${err.message}`);
+  }
+}
+
+wireSettings();
+boot();

@@ -17,7 +17,20 @@
 
 分類カテゴリ: 装置・機器の使い方 / 実験手順・プロトコル / 安全・注意事項 / データ解析・ソフトウェア / 事務・手続き / 研究室の運営・生活 / トラブル対応 / その他
 
-## 使い方
+## 2つの置き方
+
+| | ① サーバー版 | ② Google Drive版（GitHub Pages） |
+| --- | --- | --- |
+| 画面 | Node（Express）が配信 | GitHub Pages などの静的ホスティング |
+| 資料の保存先 | サーバーの `data/` | **Google Drive の共有フォルダ**（Markdown＋写真として残る） |
+| 必要なもの | Nodeが動く常設マシン | Googleアカウントのみ（サーバー不要） |
+| APIキーの置き場所 | サーバーの環境変数 | Apps Script のスクリプトプロパティ |
+
+**GitHub Pages だけでは動きません**（静的ホスティングにはデータの保存先が無いため）。
+Pages で公開する場合は、保存先として **Google Apps Script + Google Drive** を使う②の構成にします。
+画面右上の ⚙ でいつでも保存先を切り替えられます。
+
+## ① サーバー版の使い方
 
 ```bash
 npm install
@@ -33,7 +46,55 @@ npm start
 
 設定できる環境変数は `.env.example` を参照してください（モデル、ポート、保存先、添付上限）。
 
-### 3つの入り口
+## ② Google Drive で共有する（GitHub Pages 対応）
+
+研究室のDriveフォルダを資料箱の実体にします。サーバーは1台も要りません。
+**この作業をするのは最初のひとりだけ**で、他のメンバーは公開されたURLを開くだけです。
+
+### 1. Apps Script を作る
+
+1. [script.google.com](https://script.google.com/home) →「新しいプロジェクト」。
+2. `npm run build:gas` を実行し、`gas/shared.gs` と `gas/main.gs` の中身を貼り付ける
+   （エディタ左の「＋ → スクリプト」でファイルを2つ作り、それぞれに貼る）。
+3. 左の「⚙ プロジェクトの設定」→「スクリプト プロパティ」で必要なものを追加する。
+
+   | プロパティ | 必須 | 内容 |
+   | --- | --- | --- |
+   | `ROOT_FOLDER_ID` | 任意 | 資料を置くDriveフォルダのID（URLの `folders/` 以降）。未設定ならマイドライブに「引継ぎ資料箱」を自動作成 |
+   | `ANTHROPIC_API_KEY` | 任意 | AI生成・AI分類を使う場合のみ。ブラウザには渡りません |
+   | `CLAUDE_MODEL` | 任意 | 既定 `claude-opus-5` |
+   | `CLAUDE_EFFORT` | 任意 | 既定 `low`。上げると資料は厚くなるが、Apps Scriptの外部通信の時間制限に掛かりやすくなる |
+   | `ACCESS_TOKEN` | 任意 | 合言葉。設定すると、画面側でも同じ文字列を入れた人だけが読み書きできる |
+   | `PUBLIC_FILES` | 任意 | `true` にすると添付を「リンクを知る全員が閲覧可」にする（サムネイルが確実に出る代わりに公開範囲が広がる） |
+
+4. エディタで関数 `setup` を1回実行し、Driveへのアクセスを承認する（保管フォルダのURLがログに出ます）。
+5. 右上の「デプロイ」→「新しいデプロイ」→ 種類「**ウェブアプリ**」
+   - 次のユーザーとして実行: **自分**
+   - アクセスできるユーザー: **全員**（＝URLを知っている人。合言葉を併用すると安全側に寄せられます）
+6. 表示された `https://script.google.com/macros/s/……/exec` をコピーする。
+
+### 2. フォルダを研究室で共有する
+
+`setup` のログに出た保管フォルダを、研究室のメンバー（または共有ドライブ）に共有します。
+資料は `資料タイトル__ID/` フォルダの中に `資料.md`・写真・`meta.json` として入るので、
+**このアプリを経由しなくてもDriveから直接読めます**（引継ぎ資料が特定のツールに閉じ込められません）。
+
+### 3. GitHub Pages に画面を置く
+
+1. `public/config.js` の `gasUrl` に、手順1でコピーしたURLを書いてコミットする（空のままでも、各自が⚙から設定できます）。
+2. リポジトリの Settings → Pages → Source を **GitHub Actions** にする。
+3. `main` に push すると `.github/workflows/pages.yml` が `public/` を公開します。
+4. 公開URLを開き、右上のバッジが「🗂 Google Drive」になっていれば接続完了です。
+
+> URLを直接渡したいときは `https://<ユーザー名>.github.io/<リポジトリ>/?api=<Apps ScriptのURL>` でも設定できます（初回に保存されます）。
+
+### 注意点
+
+- Apps Script の外部通信には時間制限があるため、AI生成が長引くと失敗することがあります。その場合は `CLAUDE_EFFORT` を下げるか、「📝 資料作成プロンプトを出力」で手持ちのAIに投げてください。
+- 写真は送信前にブラウザ側で長辺1600pxに縮小されます（Driveに載せる量を抑えるため）。
+- サムネイルはDriveの共有設定に従います。閲覧権限が無い人の画面ではサムネイルだけ表示されません（資料本文とリンクは開けます）。
+
+## 画面の使い方（共通）
 
 1. **✍️ 資料をつくる** — メモ＋写真を入力して
    - `✨ AIで資料を作成`: Claudeが写真も読み取り、「事前準備 / 手順 / ハマりどころ / トラブル対応」構成の資料を生成し、そのまま資料箱に保存します。
@@ -64,10 +125,20 @@ server/
   prompts.js     資料作成プロンプト・分類プロンプト
 public/
   index.html / app.js / styles.css / markdown.js   （ビルド不要のフロントエンド）
-data/            db.json と添付ファイルの保存先（.gitignore済み）
+  api-client.js  保存先（サーバー / Google Drive）の違いを吸収する層
+  config.js      GitHub Pages 用の既定の保存先
+gas/
+  main.gs        Apps Script バックエンド（Drive保存・Claude呼び出し）
+  shared.gs      npm run build:gas が server/ から生成する共有ロジック
+tools/
+  build-gas.mjs  shared.gs の生成スクリプト
+data/            db.json と添付ファイルの保存先（.gitignore済み・サーバー版のみ）
 ```
 
-### API
+カテゴリ定義・キーワード分類・プロンプトは `server/` の3ファイルが唯一の原本で、
+Apps Script 版は `npm run build:gas` でそこから生成されます（2か所を直す必要はありません）。
+
+### API（サーバー版）
 
 | メソッド | パス | 用途 |
 | --- | --- | --- |
@@ -81,8 +152,15 @@ data/            db.json と添付ファイルの保存先（.gitignore済み）
 | POST | `/api/documents/:id/reclassify` | 分類のやり直し |
 | DELETE | `/api/documents/:id` | 削除（添付の実体も削除） |
 
+### API（Google Drive版）
+
+Apps Script のウェブアプリURLに `{"action": "...", "token": "...", ...}` をPOSTします
+（`config` / `list` / `get` / `prompt` / `create` / `update` / `reclassify` / `delete` / `rebuildIndex`）。
+`index.json` が壊れても `rebuildIndex` でDrive上のフォルダから作り直せます。
+
 ## カスタマイズ
 
 - **カテゴリを研究室に合わせる**: `server/categories.js` の配列を編集します。`keywords` はAPIキーが無いときの分類精度に直結するので、装置名や薬品名など研究室の言葉を足してください。
 - **資料の構成を変える**: `server/prompts.js` の `DOC_SECTIONS` が資料の章立てです。AI生成とプロンプト出力の両方に反映されます。
-- **保存先**: 既定はリポジトリ内の `data/`。`DATA_DIR` で共有ストレージ上に移せます。
+- **保存先**: サーバー版の既定はリポジトリ内の `data/`（`DATA_DIR` で変更可）。Drive版は `ROOT_FOLDER_ID` のフォルダです。
+- **共有ロジックを変えたら**: `npm run build:gas` を実行し、`gas/shared.gs` を Apps Script に貼り直してください。
