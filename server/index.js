@@ -17,8 +17,19 @@ import { CATEGORIES, isValidCategory, DEFAULT_CATEGORY } from './categories.js';
 import { listDocuments, getDocument, insertDocument, updateDocument, deleteDocument, newId } from './store.js';
 import { classifyByRules, excerptOf, deriveTitle } from './classify.js';
 import { autoClassify } from './auto-classify.js';
-import { generateDocument } from './ai.js';
-import { buildDocumentPrompt } from './prompts.js';
+import { generateDocument, generateQuiz } from './ai.js';
+import { buildDocumentPrompt, buildQuizPrompt } from './prompts.js';
+import {
+  QUIZ_KINDS,
+  QUIZ_DEFAULT_COUNT,
+  MAX_FAILURES,
+  clampQuestionCount,
+  normalizeFailure,
+  normalizeQuiz,
+  parseQuizJson,
+  parseFailureRows,
+  quizSummaryOf,
+} from './quiz.js';
 
 ensureDirs();
 
@@ -90,6 +101,8 @@ app.get('/api/config', (_req, res) => {
     categories: CATEGORIES,
     maxFileSize: MAX_FILE_SIZE,
     maxFiles: MAX_FILES,
+    quizKinds: QUIZ_KINDS,
+    quizDefaultCount: QUIZ_DEFAULT_COUNT,
   });
 });
 
@@ -107,7 +120,15 @@ app.get('/api/documents', (req, res) => {
   }
   if (needle) {
     docs = docs.filter((d) =>
-      [d.title, d.summary, d.body, d.author, (d.tags || []).join(' '), (d.attachments || []).map((a) => a.name).join(' ')]
+      [
+        d.title,
+        d.summary,
+        d.body,
+        d.author,
+        (d.tags || []).join(' '),
+        (d.attachments || []).map((a) => a.name).join(' '),
+        (d.failures || []).map((f) => `${f.title} ${f.what} ${f.why}`).join(' '),
+      ]
         .join('\n')
         .toLowerCase()
         .includes(needle),
@@ -127,7 +148,13 @@ app.get('/api/documents', (req, res) => {
   for (const doc of listDocuments()) counts[doc.category] = (counts[doc.category] || 0) + 1;
 
   res.json({
-    documents: docs.map(({ body, ...rest }) => ({ ...rest, excerpt: rest.summary || excerptOf(body) })),
+    // 一覧では本文もクイズ本体も送らない（カードに要る情報だけにする）。
+    documents: docs.map(({ body, quiz, failures, ...rest }) => ({
+      ...rest,
+      excerpt: rest.summary || excerptOf(body),
+      quiz: quizSummaryOf(quiz),
+      failureCount: (failures || []).length,
+    })),
     counts,
     total: listDocuments().length,
   });
@@ -150,7 +177,7 @@ app.get('/api/documents/:id/markdown', (req, res) => {
 
 // 資料作成プロンプトだけを組み立てて返す（AI API を使わないモード）
 app.post('/api/prompt', (req, res) => {
-  const { title = '', memo = '', author = '', tags = [], photoNames = [] } = req.body || {};
+  const { title = '', memo = '', author = '', tags = [], photoNames = [], failure = '' } = req.body || {};
   if (!String(memo).trim() && !String(title).trim()) {
     return res.status(400).json({ error: 'タイトルかメモのどちらかは入力してください' });
   }
@@ -161,6 +188,7 @@ app.post('/api/prompt', (req, res) => {
       author,
       tags: parseTags(tags),
       photoNames: Array.isArray(photoNames) ? photoNames.map(String) : [],
+      failure: String(failure || ''),
     }),
   });
 });
@@ -182,6 +210,7 @@ app.post(
     const author = String(req.body.author || '').trim();
     const inputTags = parseTags(req.body.tags);
     const requestedCategory = String(req.body.category || '').trim();
+    const failureNote = String(req.body.failure || '').trim();
 
     if (mode === 'ai' && !memo) {
       cleanupFiles(files);
@@ -198,7 +227,7 @@ app.post(
     let body;
     try {
       if (mode === 'ai') {
-        body = await generateDocument({ title, memo, author, tags: inputTags, files: forAi });
+        body = await generateDocument({ title, memo, author, tags: inputTags, failure: failureNote, files: forAi });
       } else {
         body = String(req.body.body || '').trim() || memo;
       }
@@ -224,6 +253,9 @@ app.post(
     const fallbackTitle = hasWrittenBody ? deriveTitle(body) : fileNames[0] || deriveTitle(body);
 
     const now = new Date().toISOString();
+    // 作成時に書かれた失敗談は、そのまま1件目の失敗談として資料にぶら下げる
+    // （あとでクイズの出題源になる）。
+    const failures = failureNote ? [normalizeFailure({ what: failureNote, author }, newId(), now)] : [];
     const doc = {
       id: newId(),
       title: title || fallbackTitle || '無題の資料',
@@ -235,6 +267,8 @@ app.post(
       classifiedBy: classification.classifiedBy,
       tags: [...new Set([...inputTags, ...(classification.tags || [])])].slice(0, 10),
       attachments,
+      failures,
+      quiz: null,
       source: mode === 'ai' ? 'ai' : files.length && !hasWrittenBody ? 'upload' : 'manual',
       author,
       pinned: false,
@@ -303,6 +337,130 @@ app.delete('/api/documents/:id', (req, res) => {
   const removed = deleteDocument(req.params.id);
   if (!removed) return res.status(404).json({ error: '資料が見つかりません' });
   res.json({ ok: true });
+});
+
+/* ========== 失敗談 ==========
+ * 「なぜそうするのか」は、たいてい誰かが失敗した記憶として残っている。
+ * 資料本文とは別に、短く・あとから何度でも足せる場所を用意する。
+ */
+
+app.post('/api/documents/:id/failures', (req, res) => {
+  const doc = getDocument(req.params.id);
+  if (!doc) return res.status(404).json({ error: '資料が見つかりません' });
+
+  const what = String(req.body?.what || '').trim();
+  if (!what) return res.status(400).json({ error: '何が起きたかを入力してください' });
+
+  const failures = [...(doc.failures || [])];
+  if (failures.length >= MAX_FAILURES) {
+    return res.status(400).json({ error: `失敗談は1つの資料につき${MAX_FAILURES}件までです` });
+  }
+  failures.push(
+    normalizeFailure(
+      { ...req.body, what, author: String(req.body?.author || '').trim() },
+      newId(),
+      new Date().toISOString(),
+    ),
+  );
+  res.status(201).json(updateDocument(doc.id, { failures }));
+});
+
+/**
+ * 失敗談をまとめて取り込む。
+ * 本命はGoogleフォーム（Drive版）だが、サーバー版でも回答スプレッドシートを
+ * そのままコピーして貼れるように、表のパースだけは共通にしてある。
+ */
+app.post('/api/documents/:id/failures/import', (req, res) => {
+  const doc = getDocument(req.params.id);
+  if (!doc) return res.status(404).json({ error: '資料が見つかりません' });
+
+  const rows = Array.isArray(req.body?.rows) ? req.body.rows : parseFailureRows(req.body?.text || '');
+  if (!rows.length) {
+    return res.status(400).json({ error: '取り込める行がありませんでした（「何が起きたか」の列が必要です）' });
+  }
+
+  const failures = [...(doc.failures || [])];
+  const room = MAX_FAILURES - failures.length;
+  if (room <= 0) return res.status(400).json({ error: `失敗談は1つの資料につき${MAX_FAILURES}件までです` });
+
+  const now = new Date().toISOString();
+  let imported = 0;
+  for (const row of rows.slice(0, room)) {
+    if (!String(row.what || '').trim()) continue;
+    failures.push(normalizeFailure(row, newId(), now));
+    imported += 1;
+  }
+  res.status(201).json({ ...updateDocument(doc.id, { failures }), imported });
+});
+
+app.delete('/api/documents/:id/failures/:failureId', (req, res) => {
+  const doc = getDocument(req.params.id);
+  if (!doc) return res.status(404).json({ error: '資料が見つかりません' });
+  const failures = (doc.failures || []).filter((f) => f.id !== req.params.failureId);
+  if (failures.length === (doc.failures || []).length) {
+    return res.status(404).json({ error: '失敗談が見つかりません' });
+  }
+  res.json(updateDocument(doc.id, { failures }));
+});
+
+/* ========== クイズ ========== */
+
+// クイズ作成プロンプトだけを組み立てて返す（AI API を使わないモード）
+app.post('/api/documents/:id/quiz/prompt', (req, res) => {
+  const doc = getDocument(req.params.id);
+  if (!doc) return res.status(404).json({ error: '資料が見つかりません' });
+  res.json({
+    prompt: buildQuizPrompt({
+      title: doc.title,
+      body: doc.body || '',
+      failures: doc.failures || [],
+      count: clampQuestionCount(req.body?.count),
+      focus: String(req.body?.focus || '').trim(),
+    }),
+  });
+});
+
+/**
+ * クイズの保存。
+ *  - body に json / quiz があれば、それを取り込む（手持ちのAIの出力を貼り付けた場合）
+ *  - 無ければ AI に生成させる
+ */
+app.post(
+  '/api/documents/:id/quiz',
+  asyncRoute(async (req, res) => {
+    const doc = getDocument(req.params.id);
+    if (!doc) return res.status(404).json({ error: '資料が見つかりません' });
+
+    const hasPasted = Boolean(req.body?.quiz || String(req.body?.json || '').trim());
+    let quiz;
+    if (hasPasted) {
+      try {
+        const pasted = req.body.quiz || parseQuizJson(req.body.json);
+        quiz = normalizeQuiz(pasted, { generatedBy: 'manual' });
+      } catch (err) {
+        // 貼り付けミスはユーザーが直せるので、サーバーの不調と区別して返す。
+        return res.status(400).json({ error: err.message });
+      }
+    } else {
+      if (!String(doc.body || '').trim()) {
+        return res.status(400).json({ error: '本文が空の資料からはクイズを作れません' });
+      }
+      quiz = await generateQuiz({
+        title: doc.title,
+        body: doc.body,
+        failures: doc.failures || [],
+        count: clampQuestionCount(req.body?.count),
+        focus: String(req.body?.focus || '').trim(),
+      });
+    }
+    res.status(201).json(updateDocument(doc.id, { quiz }));
+  }),
+);
+
+app.delete('/api/documents/:id/quiz', (req, res) => {
+  const doc = getDocument(req.params.id);
+  if (!doc) return res.status(404).json({ error: '資料が見つかりません' });
+  res.json(updateDocument(doc.id, { quiz: null }));
 });
 
 // エラーハンドラ（multerの制限超過もここに来る）

@@ -5,9 +5,13 @@ import {
   DOC_SYSTEM_PROMPT,
   CLASSIFY_SYSTEM_PROMPT,
   CLASSIFY_SCHEMA,
+  QUIZ_SYSTEM_PROMPT,
+  QUIZ_SCHEMA,
   buildDocumentPrompt,
   buildClassifyPrompt,
+  buildQuizPrompt,
 } from './prompts.js';
+import { normalizeQuiz } from './quiz.js';
 
 const VISION_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 const MAX_IMAGES = 6;
@@ -90,10 +94,10 @@ function imageBlocks(files = []) {
 /**
  * 引継ぎメモ（＋写真）から資料本文（Markdown）を生成する。
  */
-export async function generateDocument({ title, memo, author, tags, category, files = [] }) {
+export async function generateDocument({ title, memo, author, tags, category, failure = '', files = [] }) {
   const anthropic = getClient();
   const { blocks, names: photoNames } = imageBlocks(files);
-  const prompt = buildDocumentPrompt({ title, memo, author, tags, photoNames, category });
+  const prompt = buildDocumentPrompt({ title, memo, author, tags, photoNames, category, failure });
   const content = [...blocks, { type: 'text', text: prompt }];
 
   const message = await callWithFallback((extra) =>
@@ -155,4 +159,33 @@ export async function classifyDocument({ title, body, extra = '', fileNames = []
     summary: String(parsed.summary || ''),
     confidence: Number(parsed.confidence ?? 0.5),
   };
+}
+
+/**
+ * プロトコル資料（＋失敗談）から4択クイズを生成する。
+ * 手順の暗記ではなく「なぜそうするのか」を問う設計は prompts.js 側に置いてある。
+ */
+export async function generateQuiz({ title, body, failures = [], count, focus = '' }) {
+  const anthropic = getClient();
+  const prompt = buildQuizPrompt({ title, body, failures, count, focus });
+
+  const message = await callWithFallback((extra) =>
+    anthropic.beta.messages.create({
+      model: MODEL,
+      max_tokens: 8000,
+      system: QUIZ_SYSTEM_PROMPT,
+      output_config: { format: { type: 'json_schema', schema: QUIZ_SCHEMA } },
+      messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
+      ...extra,
+    }),
+  );
+
+  assertNotRefused(message);
+  const text = textOf(message);
+  if (!text) {
+    const err = new Error('AIからクイズを取得できませんでした。もう一度お試しください。');
+    err.status = 502;
+    throw err;
+  }
+  return normalizeQuiz(JSON.parse(text), { generatedBy: 'ai', model: MODEL });
 }
