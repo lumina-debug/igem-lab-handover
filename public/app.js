@@ -574,6 +574,12 @@ let booted = false;
 async function boot() {
   try {
     state.config = await API.getConfig();
+    if (state.config.requiresToken && !API.hasToken()) {
+      // 合言葉で保護された資料箱。初回だけ⚙で入力してもらう。
+      renderStoreBadge();
+      openSettings('この資料箱は合言葉で保護されています。研究室で共有されている合言葉を入力してください。');
+      return;
+    }
     if (booted) {
       // 保存先を切り替えたときは設定と一覧を読み直す。
       applyConfig();

@@ -120,7 +120,13 @@
     hasToken: () => Boolean(token()),
 
     /** 設定用: 指定URLに直接つないで確認する（保存前のテスト） */
-    test: (url, pass) => drive('config', { token: pass || '' }, url),
+    async test(url, pass) {
+      const config = await drive('config', { token: pass || '' }, url);
+      // config は合言葉なしでも通るので、保護されている資料箱では
+      // トークンを検査するアクションまで試して、合言葉の誤りをここで弾く。
+      if (config.requiresToken) await drive('list', { token: pass || '' }, url);
+      return config;
+    },
 
     async getConfig() {
       if (isDrive()) return Object.assign(await drive('config'), { backend: 'drive' });
