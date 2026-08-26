@@ -51,7 +51,7 @@ function formatSize(bytes) {
 }
 
 /* ---------- ファイル選択（ドラッグ＆ドロップ + プレビュー） ---------- */
-function createFilePicker(dropId, inputId, previewId) {
+function createFilePicker(dropId, inputId, previewId, driveScopeId) {
   const drop = $(`#${dropId}`);
   const input = $(`#${inputId}`);
   const preview = $(`#${previewId}`);
@@ -78,8 +78,13 @@ function createFilePicker(dropId, inputId, previewId) {
         toast(`添付は${state.config.maxFiles}件までです`, 'warn');
         break;
       }
-      if (state.config.maxFileSize && file.size > state.config.maxFileSize) {
-        toast(`${file.name} は大きすぎます（${formatSize(state.config.maxFileSize)}まで）`, 'warn');
+      const limit = API.pickLimitFor(file, state.config.maxFileSize);
+      if (limit && file.size > limit) {
+        toast(
+          `${file.name} は大きすぎます（${formatSize(limit)}まで）。` +
+            (API.isDrive() ? 'Driveに置いてURLで添付してください。' : ''),
+          'warn',
+        );
         continue;
       }
       picked.push(file);
@@ -111,11 +116,74 @@ function createFilePicker(dropId, inputId, previewId) {
   );
   drop.addEventListener('drop', (e) => add(e.dataTransfer.files));
 
+  const driveAttacher = driveScopeId ? createDriveAttacher(driveScopeId) : null;
+
   return {
     files: () => picked,
     names: () => picked.map((f) => f.name),
+    driveIds: () => (driveAttacher && API.isDrive() ? driveAttacher.ids() : []),
     clear: () => {
       picked.length = 0;
+      render();
+      driveAttacher?.clear();
+    },
+  };
+}
+
+/* ---------- Driveのファイルをアップロードせずに添付する ---------- */
+function driveFileId(input) {
+  const text = String(input || '').trim();
+  const match = text.match(/\/d\/([-\w]{15,})/) || text.match(/[?&]id=([-\w]{15,})/);
+  if (match) return match[1];
+  return /^[-\w]{15,}$/.test(text) ? text : '';
+}
+
+function createDriveAttacher(scopeId) {
+  const scope = $(`#${scopeId}-drive`);
+  const list = scope.querySelector('.drive-list');
+  const input = scope.querySelector('.drive-url');
+  const picked = [];
+
+  function render() {
+    list.innerHTML = picked
+      .map(
+        (id, index) => `<div class="preview">
+          <span class="file-icon">🔗</span>
+          <div class="preview-meta"><strong>Driveのファイル</strong><span>${esc(id)}</span></div>
+          <button type="button" class="preview-remove" data-index="${index}" aria-label="削除">✕</button>
+        </div>`,
+      )
+      .join('');
+  }
+
+  function add() {
+    const id = driveFileId(input.value);
+    if (!id) return toast('DriveのファイルURLを貼ってください（共有リンクでも可）', 'warn');
+    if (picked.includes(id)) return toast('すでに追加されています', 'warn');
+    picked.push(id);
+    input.value = '';
+    render();
+  }
+
+  scope.querySelector('.drive-add').addEventListener('click', add);
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      add();
+    }
+  });
+  list.addEventListener('click', (event) => {
+    const btn = event.target.closest('.preview-remove');
+    if (!btn) return;
+    picked.splice(Number(btn.dataset.index), 1);
+    render();
+  });
+
+  return {
+    ids: () => picked,
+    clear: () => {
+      picked.length = 0;
+      input.value = '';
       render();
     },
   };
@@ -274,8 +342,14 @@ function formValues(form) {
 }
 
 function buildPayload(form, picker, extra = {}) {
-  return Object.assign(formValues(form), { author: $('#author').value.trim(), files: picker.files() }, extra);
+  return Object.assign(
+    formValues(form),
+    { author: $('#author').value.trim(), files: picker.files(), driveFiles: picker.driveIds() },
+    extra,
+  );
 }
+
+const createOptions = () => ({ maxFileSize: state.config.maxFileSize });
 
 function switchView(view) {
   $$('.tab').forEach((tab) => tab.classList.toggle('is-active', tab.dataset.view === view));
@@ -342,6 +416,11 @@ function applyConfig() {
   renderStoreBadge();
   if (state.config.folderUrl) $('#store-badge').title = `保存先フォルダ: ${state.config.folderUrl}`;
 
+  for (const id of ['#create-drive', '#upload-drive']) {
+    // アップロードせずに添付できるのは Google Drive 保存先のときだけ。
+    $(id).hidden = state.config.backend !== 'drive';
+  }
+
   const options = state.config.categories
     .map((c) => `<option value="${c.id}">${c.emoji} ${c.label}</option>`)
     .join('');
@@ -374,8 +453,8 @@ async function init() {
   $('#author').value = localStorage.getItem('hikitsugi.author') || '';
   $('#author').addEventListener('change', (e) => localStorage.setItem('hikitsugi.author', e.target.value.trim()));
 
-  const createPicker = createFilePicker('create-drop', 'create-files', 'create-previews');
-  const uploadPicker = createFilePicker('upload-drop', 'upload-files', 'upload-previews');
+  const createPicker = createFilePicker('create-drop', 'create-files', 'create-previews', 'create');
+  const uploadPicker = createFilePicker('upload-drop', 'upload-files', 'upload-previews', 'upload');
 
   $$('.tab').forEach((tab) => tab.addEventListener('click', () => switchView(tab.dataset.view)));
 
@@ -426,7 +505,7 @@ async function init() {
     if (!formValues(form).memo) return toast('引継ぎメモを入力してください', 'warn');
     try {
       loading(true, 'AIが資料を作成しています…（30秒ほどかかることがあります）');
-      const doc = await API.createDocument(buildPayload(form, createPicker, { mode: 'ai' }));
+      const doc = await API.createDocument(buildPayload(form, createPicker, { mode: 'ai' }), createOptions());
       form.reset();
       createPicker.clear();
       $('#prompt-panel').hidden = true;
@@ -486,7 +565,7 @@ async function init() {
     if (!pasted) return toast('AIが出力したMarkdownを貼り付けてください', 'warn');
     try {
       loading(true, '保存して分類しています…');
-      const doc = await API.createDocument(buildPayload(form, createPicker, { mode: 'manual', body: pasted }));
+      const doc = await API.createDocument(buildPayload(form, createPicker, { mode: 'manual', body: pasted }), createOptions());
       form.reset();
       createPicker.clear();
       $('#paste-body').value = '';
@@ -506,10 +585,12 @@ async function init() {
   $('#upload-form').addEventListener('submit', async (event) => {
     event.preventDefault();
     const form = event.target;
-    if (uploadPicker.files().length === 0) return toast('ファイルを選択してください', 'warn');
+    if (uploadPicker.files().length === 0 && uploadPicker.driveIds().length === 0) {
+      return toast('ファイルを選択するか、DriveのURLを添付してください', 'warn');
+    }
     try {
       loading(true, 'アップロードして分類しています…');
-      const doc = await API.createDocument(buildPayload(form, uploadPicker, { mode: 'manual' }));
+      const doc = await API.createDocument(buildPayload(form, uploadPicker, { mode: 'manual' }), createOptions());
       form.reset();
       uploadPicker.clear();
       await loadDocuments();

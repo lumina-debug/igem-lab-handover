@@ -13,7 +13,10 @@
   const fromQuery = new URLSearchParams(location.search).get('api');
   if (fromQuery) localStorage.setItem(LS_URL, fromQuery.trim());
 
-  const endpoint = () => localStorage.getItem(LS_URL) || DEFAULTS.gasUrl || '';
+  // 手元で `npm start` したときは config.js の既定値より同じオリジンのサーバーを優先する
+  // （公開ページでは既定値＝研究室の資料箱がそのまま使われる）。
+  const isDevHost = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
+  const endpoint = () => localStorage.getItem(LS_URL) || (isDevHost ? '' : DEFAULTS.gasUrl || '');
   const token = () => localStorage.getItem(LS_TOKEN) || DEFAULTS.token || '';
   const isDrive = () => Boolean(endpoint());
   // file:// や GitHub Pages では同一オリジンのAPIが存在しない。
@@ -57,9 +60,12 @@
     return data;
   }
 
-  /* ---- 添付ファイル: Drive版は base64 で送るので、大きな写真は縮小してから積む ---- */
+  /* ---- 添付ファイル: 写真は送信前に縮小する（元のサイズで弾かないこと） ---- */
   const MAX_DIM = 1600;
   const RESIZE_OVER = 900 * 1024;
+  // 縮小されるので、写真は元ファイルが大きくても受け付ける。
+  const IMAGE_PICK_LIMIT = 80 * 1024 * 1024;
+  const SHRINKABLE = /^image\/(jpeg|png|webp)$/;
 
   function readAsBase64(blob) {
     return new Promise((resolve, reject) => {
@@ -82,39 +88,60 @@
     return blob;
   }
 
-  async function toPayloadFile(file) {
-    let blob = file;
-    let mime = file.type || 'application/octet-stream';
-    let name = file.name;
-    if (mime.startsWith('image/') && mime !== 'image/gif' && file.size > RESIZE_OVER) {
-      try {
-        blob = await shrinkImage(file);
-        mime = 'image/jpeg';
-        name = name.replace(/\.[^.]+$/, '') + '.jpg';
-      } catch (err) {
-        blob = file; // 縮小できなければ元のまま送る
-      }
+  /** 送信用に整えたファイルを返す。縮小できる写真は縮小し、それ以外はそのまま。 */
+  async function prepareFile(file) {
+    const mime = file.type || 'application/octet-stream';
+    if (!SHRINKABLE.test(mime) || file.size <= RESIZE_OVER) return file;
+    try {
+      const blob = await shrinkImage(file);
+      const name = `${file.name.replace(/\.[^.]+$/, '')}.jpg`;
+      return new File([blob], name, { type: 'image/jpeg' });
+    } catch (err) {
+      return file; // 縮小できなければ元のまま送る
     }
-    return { name, mime, data: await readAsBase64(blob) };
   }
 
-  async function toPayloadFiles(files = []) {
+  async function prepareFiles(files = []) {
     const out = [];
-    for (const file of files) out.push(await toPayloadFile(file));
+    for (const file of files) out.push(await prepareFile(file));
     return out;
   }
 
-  function toFormData(input) {
+  function tooLarge(file, limit) {
+    return limit && file.size > limit;
+  }
+
+  async function toPayloadFiles(files, limit) {
+    const out = [];
+    for (const file of await prepareFiles(files)) {
+      if (tooLarge(file, limit)) {
+        throw new Error(
+          `${file.name} は縮小してもまだ大きすぎます（1件あたり${Math.round(limit / 1024 / 1024)}MBまで）。` +
+            'Driveに直接置いて「Driveのファイルを添付」からURLで追加してください。',
+        );
+      }
+      out.push({ name: file.name, mime: file.type || 'application/octet-stream', data: await readAsBase64(file) });
+    }
+    return out;
+  }
+
+  async function toFormData(input) {
     const form = new FormData();
     for (const key of ['mode', 'title', 'memo', 'tags', 'category', 'author', 'body']) {
       if (input[key] !== undefined) form.set(key, input[key]);
     }
-    for (const file of input.files || []) form.append('files', file);
+    for (const file of await prepareFiles(input.files)) form.append('files', file);
     return form;
+  }
+
+  /** ファイル選択時に受け付けてよいサイズか（写真は縮小前提でゆるく判定する） */
+  function pickLimitFor(file, maxFileSize) {
+    return SHRINKABLE.test(file.type || '') ? IMAGE_PICK_LIMIT : maxFileSize;
   }
 
   const api = {
     isDrive,
+    pickLimitFor,
     endpoint,
     setEndpoint,
     hasToken: () => Boolean(token()),
@@ -148,12 +175,15 @@
       return local(`/api/documents/${id}`);
     },
 
-    async createDocument(input) {
+    async createDocument(input, limits = {}) {
       if (isDrive()) {
-        const payload = Object.assign({}, input, { files: await toPayloadFiles(input.files) });
+        const payload = Object.assign({}, input, {
+          files: await toPayloadFiles(input.files, limits.maxFileSize),
+          driveFiles: input.driveFiles || [],
+        });
         return (await drive('create', payload)).document;
       }
-      return local('/api/documents', { method: 'POST', body: toFormData(input) });
+      return local('/api/documents', { method: 'POST', body: await toFormData(input) });
     },
 
     async updateDocument(id, patch) {

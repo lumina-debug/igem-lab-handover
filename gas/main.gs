@@ -14,7 +14,7 @@ const DOC_FILE = '資料.md';
 const META_FILE = 'meta.json';
 const INDEX_FILE = 'index.json';
 const MAX_FILES_GAS = 12;
-const MAX_FILE_SIZE_GAS = 12 * 1024 * 1024; // base64で送る都合上、サーバー版より控えめ
+const MAX_FILE_SIZE_GAS = 25 * 1024 * 1024; // base64で送る都合上の上限。超えるものはDriveに置いてURLで添付する
 const VISION_TYPES_GAS = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
 
 function props_() {
@@ -253,7 +253,12 @@ function saveAttachments_(folder, files) {
   const attachments = [];
   (files || []).slice(0, MAX_FILES_GAS).forEach((file) => {
     const bytes = Utilities.base64Decode(String(file.data || ''));
-    if (bytes.length > MAX_FILE_SIZE_GAS) throw new Error(`${file.name} が大きすぎます`);
+    if (bytes.length > MAX_FILE_SIZE_GAS) {
+      throw new Error(
+        `${file.name} が大きすぎます（1件あたり${Math.round(MAX_FILE_SIZE_GAS / 1024 / 1024)}MBまで）。` +
+          'Driveに置いて「Driveのファイルを添付」からURLで追加してください。',
+      );
+    }
     const mime = String(file.mime || 'application/octet-stream');
     const blob = Utilities.newBlob(bytes, mime, String(file.name || 'file'));
     const created = folder.createFile(blob);
@@ -276,6 +281,47 @@ function saveAttachments_(folder, files) {
   return attachments;
 }
 
+/**
+ * すでにDrive上にあるファイルを、アップロードせずに添付する。
+ * base64で送れないサイズ（大きなPDF・スライド・動画）はこちらを使う。
+ */
+function resolveDriveFiles_(ids) {
+  const resolved = [];
+  (ids || []).slice(0, MAX_FILES_GAS).forEach((rawId) => {
+    const id = String(rawId || '').trim();
+    if (!id) return;
+    let file;
+    try {
+      file = DriveApp.getFileById(id);
+    } catch (err) {
+      throw new Error('Driveのファイルを開けませんでした。IDと共有設定を確認してください: ' + id);
+    }
+    const mime = file.getMimeType();
+    resolved.push({
+      id: id,
+      name: file.getName(),
+      url: 'https://drive.google.com/file/d/' + id + '/view',
+      thumbUrl: 'https://drive.google.com/thumbnail?id=' + id + '&sz=w800',
+      mime: mime,
+      size: file.getSize(),
+      isImage: mime.indexOf('image/') === 0,
+      linked: true, // 実体はこの資料フォルダの外にある
+    });
+  });
+  return resolved;
+}
+
+/** 資料フォルダにショートカットを置いてDriveから辿れるようにする（失敗してもリンクは残る）。 */
+function linkDriveFiles_(folder, resolved) {
+  resolved.forEach((meta) => {
+    try {
+      DriveApp.createShortcut(meta.id).moveTo(folder);
+    } catch (err) {
+      console.warn('ショートカットを作成できませんでした: ' + meta.id + ' / ' + err);
+    }
+  });
+}
+
 function createDocument_(request) {
   const root = rootFolder_();
   const mode = request.mode === 'ai' ? 'ai' : 'manual';
@@ -285,15 +331,16 @@ function createDocument_(request) {
   const inputTags = parseTags_(request.tags);
   const requested = String(request.category || '').trim();
   const files = request.files || [];
+  const linkedFiles = resolveDriveFiles_(request.driveFiles);
   const writtenBody = String(request.body || '').trim();
 
   if (mode === 'ai' && !memo) throw new Error('引継ぎメモを入力してください');
-  if (mode === 'manual' && !writtenBody && !memo && files.length === 0) {
+  if (mode === 'manual' && !writtenBody && !memo && files.length === 0 && linkedFiles.length === 0) {
     throw new Error('本文かファイルのどちらかは必要です');
   }
 
   const body = mode === 'ai' ? generateDocumentGas_(title, memo, author, inputTags, files) : writtenBody || memo;
-  const fileNames = files.map((f) => String(f.name || ''));
+  const fileNames = files.map((f) => String(f.name || '')).concat(linkedFiles.map((f) => f.name));
   const known = CATEGORIES.some((c) => c.id === requested);
   const classification = known
     ? { category: requested, tags: [], summary: excerptOf(body), confidence: 1, classifiedBy: 'manual' }
@@ -305,7 +352,8 @@ function createDocument_(request) {
   const finalTitle = title || fallbackTitle || '無題の資料';
 
   const folder = root.createFolder(folderName_(finalTitle, id));
-  const attachments = saveAttachments_(folder, files);
+  linkDriveFiles_(folder, linkedFiles);
+  const attachments = saveAttachments_(folder, files).concat(linkedFiles);
   writeTextFile_(folder, DOC_FILE, body, 'text/markdown');
 
   const now = new Date().toISOString();
@@ -324,7 +372,7 @@ function createDocument_(request) {
     classifiedBy: classification.classifiedBy,
     tags: tags.slice(0, 10),
     attachments: attachments,
-    source: mode === 'ai' ? 'ai' : files.length && !hasWrittenBody ? 'upload' : 'manual',
+    source: mode === 'ai' ? 'ai' : (files.length || linkedFiles.length) && !hasWrittenBody ? 'upload' : 'manual',
     author: author,
     pinned: false,
     createdAt: now,
