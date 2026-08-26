@@ -714,6 +714,36 @@ function openForm_() {
   return FormApp.openById(id);
 }
 
+/** 編集URL・回答URL・IDのどれを渡されてもフォームIDを取り出す。 */
+function formIdFrom_(input) {
+  const text = String(input || '').trim();
+  const match = text.match(/\/forms\/d\/(?:e\/)?([-\w]{20,})/);
+  if (match) return match[1];
+  if (/^[-\w]{20,}$/.test(text)) return text;
+  throw new Error('フォームのURLかIDを渡してください: ' + text);
+}
+
+/**
+ * すでに自分たちで作ったGoogleフォームを、この資料箱に紐づける。
+ * Apps Scriptのエディタで、フォームの編集URLを引数にして1回実行する。
+ *
+ *   adoptForm('https://docs.google.com/forms/d/……/edit')
+ *
+ * 質問文はこちらで書き換えない（各チームの文言をそのまま活かす）。
+ * 回答シートの列は文言ではなく意味で探すため、「目的」「起きたこと」「判断と理由」「次の手」に
+ * あたる語が質問文のどこかに入っていれば取り込める。
+ */
+function adoptForm(formUrlOrId) {
+  const id = formIdFrom_(formUrlOrId);
+  const form = FormApp.openById(id); // 開けなければここで失敗する（権限の確認を兼ねる）
+  props_().setProperty('FORM_ID', id);
+  // 別のフォームに付け替えたときに古い回答シートを見ないよう、いったん外す。
+  props_().deleteProperty('SHEET_ID');
+  props_().deleteProperty('SHEET_URL');
+  console.log('フォームを紐づけました: ' + form.getTitle());
+  return setupForm();
+}
+
 /**
  * 失敗談フォームと回答スプレッドシートを作る（最初に1回だけエディタから実行する）。
  * すでにある場合は選択肢の作り直しだけを行う。
@@ -756,23 +786,72 @@ function setupForm() {
       .setHelpText('例: 結合部分のTmで再設定。まだ決まっていなければ「記録なし」で構いません');
     form.addTextItem().setTitle(Q_AUTHOR);
 
-    const sheet = SpreadsheetApp.create(FORM_TITLE + 'の回答');
-    form.setDestination(FormApp.DestinationType.SPREADSHEET, sheet.getId());
-    DriveApp.getFileById(sheet.getId()).moveTo(root);
     DriveApp.getFileById(form.getId()).moveTo(root);
-
     props_().setProperty('FORM_ID', form.getId());
-    props_().setProperty('FORM_URL', form.getPublishedUrl());
-    props_().setProperty('SHEET_ID', sheet.getId());
-    props_().setProperty('SHEET_URL', sheet.getUrl());
-    installFormTrigger_(form);
   }
+
+  // ここから先は、新規作成でも既存フォームの引き取りでも共通。
+  ensureTargetItem_(form);
+  ensureResponseSheet_(form);
+  installFormTrigger_(form);
+  props_().setProperty('FORM_URL', form.getPublishedUrl());
 
   const count = refreshFormTargets_(form);
   console.log('フォーム（回答用）: ' + prop_('FORM_URL', ''));
+  console.log('フォーム（編集用）: ' + form.getEditUrl());
   console.log('回答スプレッドシート: ' + prop_('SHEET_URL', ''));
   console.log('選択肢に載せた資料: ' + Math.max(count - 1, 0) + '件');
+  reportFormColumns_();
   return { formUrl: prop_('FORM_URL', ''), sheetUrl: prop_('SHEET_URL', '') };
+}
+
+/** 「どの作業か」の質問が無いフォームには足す（これが無いと回答を資料に振り分けられない）。 */
+function ensureTargetItem_(form) {
+  if (findFormItem_(form, Q_TARGET)) return;
+  const items = form.getItems(FormApp.ItemType.LIST);
+  for (let i = 0; i < items.length; i += 1) {
+    if (findTargetColumn([items[i].getTitle()]) !== -1) return; // 文言違いでも既にあるとみなす
+  }
+  const added = form.addListItem().setTitle(Q_TARGET).setRequired(true);
+  // 先頭に置く。どの作業の話かが決まらないと、残りの回答が宙に浮く。
+  form.moveItem(added.getIndex(), 0);
+  console.log('「' + Q_TARGET + '」の質問をフォームの先頭に追加しました。');
+}
+
+/** 回答先のスプレッドシートを用意する（既にあるならそれを使う）。 */
+function ensureResponseSheet_(form) {
+  let sheetId = form.getDestinationId ? form.getDestinationId() : '';
+  if (!sheetId) {
+    const created = SpreadsheetApp.create(form.getTitle() + 'の回答');
+    form.setDestination(FormApp.DestinationType.SPREADSHEET, created.getId());
+    DriveApp.getFileById(created.getId()).moveTo(rootFolder_());
+    sheetId = created.getId();
+    console.log('回答スプレッドシートを作成しました。');
+  }
+  props_().setProperty('SHEET_ID', sheetId);
+  props_().setProperty('SHEET_URL', SpreadsheetApp.openById(sheetId).getUrl());
+}
+
+/** どの質問がどの項目として読まれるかをログに出す（文言を変えたときの確認用）。 */
+function reportFormColumns_() {
+  let header;
+  try {
+    const sheet = responseSheet_();
+    if (sheet.getLastColumn() < 1) return console.log('回答シートはまだ空です（1件送信すると列ができます）。');
+    header = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  } catch (err) {
+    return console.log('回答シートを読めませんでした: ' + err);
+  }
+  const cols = failureColumnsOf_(header);
+  const label = { purpose: '目的', what: '起きたこと', why: '判断と理由', next: '次の手', author: '名前' };
+  console.log('--- 回答シートの列の読み取り ---');
+  console.log('  どの作業か → ' + (cols.target === -1 ? '見つかりません' : header[cols.target]));
+  Object.keys(label).forEach((key) => {
+    console.log('  ' + label[key] + ' → ' + (cols[key] === -1 ? '見つかりません' : header[cols[key]]));
+  });
+  if (cols.what === -1) {
+    console.log('⚠ 「起きたこと」にあたる列が見つかりません。質問文に「起きたこと」「何が起き」などの語を入れてください。');
+  }
 }
 
 /** 回答が入るたびに取り込むトリガー（同じものを二重に付けない）。 */
@@ -807,6 +886,30 @@ function columnIndexOf_(header, title) {
 }
 
 /**
+ * 回答シートの見出しから、各項目の列番号を決める。
+ * 自分たちで作ったフォームの質問文をまず厳密に照合し、外れた分は
+ * shared.gs の意味ベースの判別（貼り付け取り込みと同じもの）で拾う。
+ * 各チームが質問文を書き換えても取り込みが壊れないようにするため。
+ */
+function failureColumnsOf_(header) {
+  const hinted = mapFailureColumns(header) || {};
+  const pick = function (title, key) {
+    const exact = columnIndexOf_(header, title);
+    if (exact !== -1) return exact;
+    return hinted[key] === undefined ? -1 : hinted[key];
+  };
+  const target = columnIndexOf_(header, Q_TARGET);
+  return {
+    target: target !== -1 ? target : findTargetColumn(header),
+    purpose: pick(Q_PURPOSE, 'purpose'),
+    what: pick(Q_WHAT, 'what'),
+    why: pick(Q_WHY, 'why'),
+    next: pick(Q_NEXT, 'next'),
+    author: pick(Q_AUTHOR, 'author'),
+  };
+}
+
+/**
  * スプレッドシートの未取り込みの回答を、各資料の失敗談に流し込む。
  * 取り込んだ行にはシート上で印を付けるので、何度実行しても二重に入らない。
  */
@@ -823,15 +926,13 @@ function syncFormResponses_() {
     sheet.getRange(1, statusCol + 1).setValue(SYNC_COLUMN);
   }
 
-  const cols = {
-    target: columnIndexOf_(header, Q_TARGET),
-    purpose: columnIndexOf_(header, Q_PURPOSE),
-    what: columnIndexOf_(header, Q_WHAT),
-    why: columnIndexOf_(header, Q_WHY),
-    next: columnIndexOf_(header, Q_NEXT),
-    author: columnIndexOf_(header, Q_AUTHOR),
-  };
-  if (cols.what === -1) throw new Error('回答シートに「' + Q_WHAT + '」の列が見つかりません');
+  const cols = failureColumnsOf_(header);
+  if (cols.what === -1) {
+    throw new Error(
+      '回答シートから「起きたこと」にあたる列を見つけられませんでした。' +
+        'フォームの質問文に「起きたこと」「何が起き」などの語を入れてから、setupForm を実行しなおしてください。',
+    );
+  }
 
   const rows = sheet.getRange(2, 1, lastRow - 1, Math.max(width, statusCol + 1)).getValues();
   const root = rootFolder_();

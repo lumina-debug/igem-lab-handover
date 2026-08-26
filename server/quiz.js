@@ -285,19 +285,23 @@ function splitRow(line) {
  * フォームの回答シートと、手で作った表の両方を同じ形に落とせるようにする。
  */
 const FAILURE_HEADER_HINTS = [
-  { key: 'purpose', words: ['目的', '何をしよう', 'しようとして', 'ねらい'] },
-  { key: 'what', words: ['起きたこと', '何が起き', '起き', '何が', 'なにが', '失敗', 'できごと', '内容'] },
+  { key: 'purpose', words: ['目的', '何をしよう', 'しようとして', 'ねらい', 'どういう状況', '状況', '背景'] },
+  { key: 'what', words: ['起きたこと', '何が起き', 'どういう失敗', '起き', '何が', 'なにが', '失敗', 'できごと', '内容'] },
   { key: 'why', words: ['判断と理由', '判断', 'なぜ', '理由', '原因'] },
-  { key: 'next', words: ['次の手', '次に', 'このあと', '防', '対策', '次から', 'どうすれば'] },
+  { key: 'next', words: ['次の手', '改善', '回避', '次に', 'このあと', '防', '対策', '次から', 'どうすれば'] },
   { key: 'source', words: ['出典', '元記録', 'リンク', 'ソース'] },
   { key: 'author', words: ['名前', '氏名', '回答者', '記入者', '記録した'] },
 ];
 
-/** 見出し行があれば列の意味を拾う。無ければ what / why / prevention / author の順とみなす。 */
-function mapHeader(cells) {
+/**
+ * 見出し行から、どの列が何かを当てる。1つも当たらなければ null。
+ * 貼り付けた表と、Googleフォームの回答シートの両方でこれを使う——
+ * フォームの質問文は各チームが自由に書き換えるので、文言そのものには依存させない。
+ */
+export function mapFailureColumns(cells) {
   const map = {};
   let matched = 0;
-  cells.forEach((raw, index) => {
+  (cells || []).forEach((raw, index) => {
     const cell = String(raw || '');
     for (const hint of FAILURE_HEADER_HINTS) {
       if (map[hint.key] !== undefined) continue;
@@ -309,6 +313,13 @@ function mapHeader(cells) {
     }
   });
   return matched >= 1 ? map : null;
+}
+
+/** 回答をどの資料に紐づけるかを選ばせる列。 */
+export function findTargetColumn(cells) {
+  const words = ['どの作業', 'どのプロトコル', '対象', '作業・プロトコル', 'どの実験', '資料'];
+  const index = (cells || []).findIndex((raw) => words.some((w) => String(raw || '').indexOf(w) !== -1));
+  return index;
 }
 
 /**
@@ -323,7 +334,7 @@ export function parseFailureRows(input) {
   if (!lines.length) return [];
 
   const rows = lines.map(splitRow);
-  const header = mapHeader(rows[0]);
+  const header = mapFailureColumns(rows[0]);
   // 見出しが無い表は「目的 / 起きたこと / 判断と理由 / 次の手 / 出典 / 名前」の順とみなす。
   const columns = header || { purpose: 0, what: 1, why: 2, next: 3, source: 4, author: 5 };
   const body = header ? rows.slice(1) : rows;
