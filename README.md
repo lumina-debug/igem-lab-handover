@@ -83,7 +83,8 @@ npm start
 
 1. `public/config.js` の `gasUrl` に、手順1でコピーしたURLを書いてコミットする（空のままでも、各自が⚙から設定できます）。
 2. リポジトリの Settings → Pages → Source を **GitHub Actions** にする。
-3. `main` に push すると `.github/workflows/pages.yml` が `public/` を公開します。
+3. `main` に push すると `.github/workflows/pages.yml` が `public/` を公開します
+   （公開URLは `https://<ユーザー名>.github.io/<リポジトリ名>/` のようにリポジトリ名がぶら下がります）。
 4. 公開URLを開き、右上のバッジが「🗂 Google Drive」になっていれば接続完了です。
 
 > URLを直接渡したいときは `https://<ユーザー名>.github.io/<リポジトリ>/?api=<Apps ScriptのURL>` でも設定できます（初回に保存されます）。
