@@ -22,13 +22,14 @@
         <button type="button" id="btn-settings" class="icon-btn" title="保存先の設定" aria-label="保存先の設定">⚙️</button>
         <label class="author-field">
           <span>あなたの名前</span>
-          <input id="author" type="text" placeholder="例: 田中（M2）" autocomplete="name" />
+          <input id="author" type="text" placeholder="例: 田中（B4）" autocomplete="name" />
         </label>
       </div>
     </header>
 
     <nav class="tabs" role="tablist">
       <button class="tab is-active" data-view="box" role="tab">📚 資料箱</button>
+      <button class="tab" data-view="quiz" role="tab">🧠 クイズ</button>
       <button class="tab" data-view="create" role="tab">✍️ 資料をつくる</button>
       <button class="tab" data-view="upload" role="tab">📎 そのままアップロード</button>
     </nav>
@@ -51,27 +52,68 @@
         </p>
       </section>
 
+      <!-- クイズ -->
+      <section id="view-quiz" class="view">
+        <div class="panel intro-panel">
+          <h2>🧠 プロトコルのクイズ</h2>
+          <p class="hint">
+            手順書はいつでも読み返せますが、「なぜその手順なのか」は先輩が卒業すると消えます。
+            ここにあるのは、その<strong>なぜ</strong>だけを5問で受け取るためのクイズです。
+            資料を読む前に解いて構いません——間違えたところが、いま読むべきところです。
+          </p>
+          <ol class="flow">
+            <li><strong>失敗を集める</strong><span>フォームに1件1分。犯人探しには使わない</span></li>
+            <li><strong>AIがクイズにする</strong><span>失敗を「なぜそうするのか」の問題に変換</span></li>
+            <li><strong>後輩が解く</strong><span>間違えた瞬間に、背景と実際の失敗が出る</span></li>
+          </ol>
+        </div>
+
+        <div class="panel" id="form-panel">
+          <h2>💥 失敗談フォーム</h2>
+          <div id="form-panel-body"></div>
+        </div>
+
+        <div class="quiz-list-head">
+          <h2>解けるクイズ</h2>
+          <span id="quiz-progress-summary" class="hint"></span>
+        </div>
+        <div id="quiz-list" class="cards"></div>
+        <p id="quiz-empty" class="empty" hidden></p>
+
+        <details id="quiz-todo" class="panel todo-panel" hidden>
+          <summary>クイズがまだ無い資料 <span id="quiz-todo-count"></span></summary>
+          <p class="hint">資料を開いて「🧠 クイズを作る」を押すと、本文と失敗談から問題が作られます。</p>
+          <div id="quiz-todo-list" class="todo-list"></div>
+        </details>
+      </section>
+
       <!-- 資料をつくる -->
       <section id="view-create" class="view">
         <div class="panel">
           <h2>引継ぎメモから資料をつくる</h2>
           <p class="hint">
-            箇条書き・言い回しの雑さは気にしなくて大丈夫です。写真（装置の全景、スイッチの位置、画面のスクショなど）があるほど資料の精度が上がります。
+            箇条書き・言い回しの雑さは気にしなくて大丈夫です。写真（装置の全景、スイッチの位置、ゲルの写真、画面のスクショなど）があるほど資料の精度が上がります。
           </p>
           <form id="create-form" class="form">
             <label class="field">
               <span>タイトル<em>（空欄ならAIが付けます）</em></span>
-              <input name="title" type="text" placeholder="例: SEMの立ち上げから撮影までの手順" />
+              <input name="title" type="text" placeholder="例: 大腸菌の形質転換（ヒートショック法）" />
             </label>
 
             <label class="field">
               <span>引継ぎメモ<em class="req">必須</em></span>
               <textarea name="memo" rows="12" placeholder="例）
-・SEMは朝イチだと真空が落ちてるので、まず排気を確認
-・電源は右下の緑ボタン。順番を間違えるとエラーE12が出る
-・試料台は3番のやつを使う。カーボンテープは棚の一番上
-・撮影条件は加速電圧15kV、WD10mmくらいが無難
-・予約表はSlackの#sem-予約 に書く。無断で使うと怒られる"></textarea>
+・コンピテントセルは-80℃から出したら氷上で解凍。溶けたらすぐ使う
+・プラスミドは1uLくらい。入れすぎても効率は上がらない
+・氷上30分 → 42℃で45秒 → すぐ氷に戻して2分。この順番は崩さない
+・SOCを加えて37℃で1時間振とうしてからプレートに播く
+・プレートは逆さにして37℃のインキュベーターへ。一晩で生える"></textarea>
+            </label>
+
+            <label class="field">
+              <span>ここでやらかしたこと<em>（任意・あとから何度でも足せます）</em></span>
+              <textarea name="failure" rows="3" placeholder="例）ヒートショックのあと氷に戻さずSOCを入れてしまい、コロニーがほとんど生えなかった"></textarea>
+              <em class="field-note">失敗は「なぜその手順なのか」が一番濃く残っている場所です。書いた失敗はクイズの問題になります。</em>
             </label>
 
             <div class="field">
@@ -95,7 +137,7 @@
             <div class="grid-2">
               <label class="field">
                 <span>タグ<em>（任意・カンマ区切り）</em></span>
-                <input name="tags" type="text" placeholder="SEM, 撮影, 装置" />
+                <input name="tags" type="text" placeholder="形質転換, 大腸菌, プロトコル" />
               </label>
               <label class="field">
                 <span>カテゴリ</span>
@@ -125,7 +167,7 @@
           </div>
           <label class="field">
             <span>AIが出力した資料（Markdown）を貼り付け</span>
-            <textarea id="paste-body" rows="10" placeholder="# SEMの立ち上げ手順&#10;&#10;## この資料について&#10;..."></textarea>
+            <textarea id="paste-body" rows="10" placeholder="# 大腸菌の形質転換&#10;&#10;## この資料について&#10;..."></textarea>
           </label>
           <div class="actions">
             <button type="button" id="btn-save-pasted" class="btn btn-primary">📥 資料箱に保存する</button>
@@ -138,7 +180,7 @@
         <div class="panel">
           <h2>手元の資料をそのまま置く</h2>
           <p class="hint">
-            AIで作った資料でなくても構いません。装置の写真、紙のマニュアルのスキャン、前任者のスライド、Excelの管理表——
+            AIで作った資料でなくても構いません。装置の写真、紙のマニュアルのスキャン、前任者のスライド、プラスミドの管理表——
             置いておけば自動で分類され、検索できる場所に並びます。
           </p>
           <form id="upload-form" class="form">
@@ -161,16 +203,16 @@
               </div>
             <label class="field">
               <span>タイトル<em>（空欄ならファイル名を使います）</em></span>
-              <input name="title" type="text" placeholder="例: 恒温槽の取扱説明書（紙のスキャン）" />
+              <input name="title" type="text" placeholder="例: サーマルサイクラーの取扱説明書（紙のスキャン）" />
             </label>
             <label class="field">
               <span>ひとことメモ<em>（何の資料か・どこで使うか。分類の精度が上がります）</em></span>
-              <textarea name="memo" rows="4" placeholder="例: 4階実験室の恒温槽の説明書。温度設定のところだけ付箋を貼ってある。"></textarea>
+              <textarea name="memo" rows="4" placeholder="例: 実験室のサーマルサイクラーの説明書。プログラムの組み方のページに付箋を貼ってある。"></textarea>
             </label>
             <div class="grid-2">
               <label class="field">
                 <span>タグ<em>（任意）</em></span>
-                <input name="tags" type="text" placeholder="恒温槽, マニュアル" />
+                <input name="tags" type="text" placeholder="サーマルサイクラー, マニュアル" />
               </label>
               <label class="field">
                 <span>カテゴリ</span>
@@ -196,6 +238,8 @@
         </div>
         <div id="detail-body" class="detail-body markdown"></div>
         <div id="detail-attachments" class="attachments"></div>
+        <div id="detail-failures" class="detail-section"></div>
+        <div id="detail-quiz" class="detail-section"></div>
         <div id="detail-edit" class="edit-area" hidden></div>
         <div class="detail-actions">
           <button type="button" id="btn-edit" class="btn">✏️ 編集</button>
@@ -230,6 +274,21 @@
           <button type="button" id="settings-save" class="btn btn-primary">🔗 接続して保存</button>
           <button type="button" id="settings-clear" class="btn">このサーバーに戻す</button>
         </div>
+      </div>
+    </div>
+
+    <!-- クイズを解く -->
+    <div id="quiz-player" class="overlay" hidden>
+      <div class="detail-panel quiz-panel" role="dialog" aria-modal="true">
+        <div class="quiz-head">
+          <div>
+            <span class="quiz-eyebrow" id="quiz-doc-title"></span>
+            <div class="quiz-bar"><span id="quiz-bar-fill"></span></div>
+          </div>
+          <span id="quiz-step" class="quiz-step"></span>
+          <button type="button" id="quiz-close" class="icon-btn" aria-label="閉じる">✕</button>
+        </div>
+        <div id="quiz-stage" class="quiz-stage"></div>
       </div>
     </div>
 

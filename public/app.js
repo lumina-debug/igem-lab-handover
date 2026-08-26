@@ -4,8 +4,10 @@ const state = {
   filters: { q: '', category: '', tag: '', sort: 'new' },
   counts: {},
   total: 0,
+  documents: [],
   current: null,
   editing: false,
+  player: null,
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -224,6 +226,8 @@ function cardHtml(doc) {
         ${doc.author ? `<span>${esc(doc.author)}</span>` : ''}
         <span>${SOURCE_LABEL[doc.source] || doc.source}</span>
         ${attachments.length ? `<span>📎 ${attachments.length}</span>` : ''}
+        ${doc.failureCount ? `<span title="失敗談">💥 ${doc.failureCount}</span>` : ''}
+        ${doc.quiz ? `<span class="quiz-badge" title="クイズがあります">🧠 ${doc.quiz.count}問</span>` : ''}
         <span class="conf" title="分類の確信度">${CLASSIFIER_LABEL[doc.classifiedBy] || ''}${confidence ? ` ${confidence}%` : ''}</span>
       </div>
     </div>
@@ -234,6 +238,8 @@ async function loadDocuments() {
   const data = await API.listDocuments(state.filters);
   state.counts = data.counts;
   state.total = data.total;
+  state.documents = data.documents;
+  renderQuizView();
   renderChips();
   $('#doc-list').innerHTML = data.documents.map(cardHtml).join('');
   const nothing = data.documents.length === 0;
@@ -273,11 +279,15 @@ function renderDetail(doc) {
     <div class="tag-row">${(doc.tags || []).map((t) => `<span class="tag">#${esc(t)}</span>`).join('')}</div>`;
   $('#detail-body').innerHTML = window.markdown.render(doc.body || '');
   $('#detail-attachments').innerHTML = (doc.attachments || []).map(attachmentHtml).join('');
+  renderFailures(doc);
+  renderQuizSection(doc);
   $('#btn-pin').textContent = doc.pinned ? '📌 ピン留めを外す' : '📌 ピン留め';
   $('#btn-edit').textContent = '✏️ 編集';
   state.editing = false;
   $('#detail-edit').hidden = true;
   $('#detail-body').hidden = false;
+  $('#detail-failures').hidden = false;
+  $('#detail-quiz').hidden = false;
   $('#detail').hidden = false;
   document.body.classList.add('is-locked');
 }
@@ -300,6 +310,8 @@ function openEditor() {
     </div>`;
   $('#detail-edit').hidden = false;
   $('#detail-body').hidden = true;
+  $('#detail-failures').hidden = true;
+  $('#detail-quiz').hidden = true;
   state.editing = true;
   $('#btn-edit').textContent = '👁 プレビュー';
 
@@ -330,12 +342,411 @@ function closeDetail() {
   state.current = null;
 }
 
+/* ==================== 失敗談とクイズ ====================
+ * 引継ぎで失われるのは手順ではなく、手順の理由。
+ * 失敗談＝理由がいちばん濃く残っている場所を集め、それをクイズにして渡す。
+ */
+
+const KIND_LABEL = {
+  why: { emoji: '🤔', label: 'なぜそうするのか' },
+  judge: { emoji: '⚖️', label: '現場での判断' },
+  trouble: { emoji: '🛠️', label: 'トラブル対応' },
+  step: { emoji: '📋', label: '手順の勘どころ' },
+};
+
+const kindOf = (id) => KIND_LABEL[id] || KIND_LABEL.why;
+const CHOICE_MARKS = ['A', 'B', 'C', 'D', 'E'];
+
+/* ---------- 成績（この端末にだけ残す） ---------- */
+const PROGRESS_KEY = 'hikitsugi.quizProgress';
+
+function readProgress() {
+  try {
+    return JSON.parse(localStorage.getItem(PROGRESS_KEY) || '{}') || {};
+  } catch {
+    return {};
+  }
+}
+
+function progressOf(docId) {
+  return readProgress()[docId] || null;
+}
+
+function writeProgress(docId, entry) {
+  const all = readProgress();
+  all[docId] = entry;
+  try {
+    localStorage.setItem(PROGRESS_KEY, JSON.stringify(all));
+  } catch {
+    // 容量オーバーなどで保存できなくても、クイズ自体は解ける
+  }
+  return entry;
+}
+
+/**
+ * 成績を記録する。
+ * 「間違えた問題だけもう一度」は復習なので、その回だけの点数（1/1 など）で上書きせず、
+ * クイズ全体のうち何問が未消化かを更新する。
+ */
+function saveProgress(docId, round) {
+  const before = progressOf(docId);
+  const times = (before?.times || 0) + 1;
+
+  if (!round.review) {
+    return writeProgress(docId, {
+      correct: round.correct,
+      total: round.total,
+      wrongIds: round.wrongIds,
+      at: new Date().toISOString(),
+      times,
+    });
+  }
+
+  const total = before?.total || round.total;
+  const wrong = new Set(before?.wrongIds || []);
+  for (const id of round.clearedIds) wrong.delete(id);
+  for (const id of round.wrongIds) wrong.add(id);
+  return writeProgress(docId, {
+    correct: Math.max(total - wrong.size, 0),
+    total,
+    wrongIds: [...wrong],
+    at: new Date().toISOString(),
+    times,
+  });
+}
+
+/* ---------- 失敗談 ---------- */
+function failureHtml(failure) {
+  const parts = [`<p class="failure-what">${esc(failure.what)}</p>`];
+  if (failure.why) parts.push(`<p class="failure-line"><b>なぜ</b>${esc(failure.why)}</p>`);
+  if (failure.prevention) parts.push(`<p class="failure-line"><b>次から</b>${esc(failure.prevention)}</p>`);
+  return `<li class="failure" data-failure-id="${esc(failure.id)}">
+    <div class="failure-body">${parts.join('')}</div>
+    <div class="failure-foot">
+      <span>${failure.author ? esc(failure.author) : '匿名'} · ${formatDate(failure.createdAt)}</span>
+      <button type="button" class="link-btn failure-remove" data-failure-id="${esc(failure.id)}">削除</button>
+    </div>
+  </li>`;
+}
+
+function renderFailures(doc) {
+  const failures = doc.failures || [];
+  $('#detail-failures').innerHTML = `
+    <div class="section-head">
+      <h3>💥 失敗談 <span class="count">${failures.length}</span></h3>
+      <button type="button" class="link-btn" id="failure-toggle">＋ 書く</button>
+    </div>
+    ${
+      failures.length
+        ? `<ul class="failure-list">${failures.map(failureHtml).join('')}</ul>`
+        : '<p class="hint">まだありません。うまくいかなかったことを1つ書くと、それが後輩へのクイズになります。</p>'
+    }
+    <div class="failure-form" id="failure-form" hidden>
+      <label class="field">
+        <span>何が起きた？<em class="req">必須</em></span>
+        <textarea id="failure-what" rows="2" placeholder="例: コロニーが1つも生えなかった"></textarea>
+      </label>
+      <div class="grid-2">
+        <label class="field">
+          <span>なぜ起きた？<em>（分かれば）</em></span>
+          <textarea id="failure-why" rows="2" placeholder="例: コンピテントセルを氷から出したまま置いた"></textarea>
+        </label>
+        <label class="field">
+          <span>どうすれば防げる？<em>（分かれば）</em></span>
+          <textarea id="failure-prevention" rows="2" placeholder="例: 使う直前まで氷上に置く"></textarea>
+        </label>
+      </div>
+      <div class="actions">
+        <button type="button" class="btn btn-primary" id="failure-save">💾 失敗談を残す</button>
+        <button type="button" class="btn" id="failure-import-toggle">📊 表から取り込む</button>
+      </div>
+      <label class="field" id="failure-import" hidden>
+        <span>回答スプレッドシートの表を貼り付け<em>（見出し行ごと貼って大丈夫です）</em></span>
+        <textarea id="failure-rows" rows="4" placeholder="何が起きましたか	なぜ起きたと思いますか	どうすれば防げますか	お名前"></textarea>
+        <div class="actions">
+          <button type="button" class="btn" id="failure-import-run">📥 まとめて取り込む</button>
+        </div>
+      </label>
+    </div>`;
+}
+
+/* ---------- 詳細画面のクイズ欄 ---------- */
+function quizIsStale(doc) {
+  // 失敗談が増えたあとのクイズは、その失敗を知らないまま出題している。
+  if (!doc.quiz || !doc.quiz.createdAt) return false;
+  return (doc.failures || []).some((f) => String(f.createdAt || '') > String(doc.quiz.createdAt));
+}
+
+function renderQuizSection(doc) {
+  const quiz = doc.quiz;
+  const aiOff = !state.config.aiEnabled;
+  const progress = progressOf(doc.id);
+
+  const head = `<div class="section-head">
+      <h3>🧠 クイズ ${quiz ? `<span class="count">${quiz.questions.length}問</span>` : ''}</h3>
+      ${quiz ? '<button type="button" class="link-btn" id="quiz-remove">削除</button>' : ''}
+    </div>`;
+
+  // 作る／作り直すのどちらでも、AI経路とプロンプト出力経路の両方を残す
+  // （APIキーが無い研究室でも、作り直しまで到達できるように）。
+  const makeLabel = quiz ? '🔄 AIで作り直す' : '✨ AIでクイズを作る';
+  const makeButtons = `<button type="button" class="btn ${quiz ? '' : 'btn-primary'}" id="quiz-make" ${aiOff ? 'disabled' : ''}>${makeLabel}</button>
+      <button type="button" class="btn" id="quiz-prompt">📝 ${quiz ? '作り直す用の' : ''}プロンプトを出力</button>`;
+
+  const body = quiz
+    ? `<div class="quiz-cta">
+        <button type="button" class="btn btn-primary" id="quiz-start">▶ クイズを解く（${quiz.questions.length}問）</button>
+        ${makeButtons}
+      </div>
+      ${progress ? `<p class="hint">前回 ${progress.correct}/${progress.total}（${formatDate(progress.at)}・${progress.times}回目）</p>` : ''}
+      ${quizIsStale(doc) ? '<p class="notice">この後に失敗談が増えています。作り直すと新しい失敗も問題に入ります。</p>' : ''}`
+    : `<p class="hint">
+        本文${(doc.failures || []).length ? `と失敗談${doc.failures.length}件` : ''}から、「なぜそうするのか」を問う4択クイズを作ります。
+       </p>
+       <div class="quiz-cta">${makeButtons}</div>
+       ${aiOff ? '<p class="hint">APIキーが未設定のため、プロンプトを出して手持ちのAIに貼る経路をお使いください。</p>' : ''}`;
+
+  $('#detail-quiz').innerHTML = `${head}${body}
+    <div class="quiz-paste" id="quiz-paste" hidden>
+      <pre id="quiz-prompt-text" class="prompt-box"></pre>
+      <div class="actions">
+        <button type="button" class="btn" id="quiz-prompt-copy">📋 プロンプトをコピー</button>
+      </div>
+      <label class="field">
+        <span>AIが出力したJSONを貼り付け</span>
+        <textarea id="quiz-json" rows="6" placeholder='{"questions": [...]}'></textarea>
+      </label>
+      <div class="actions">
+        <button type="button" class="btn btn-primary" id="quiz-json-save">📥 クイズを保存する</button>
+      </div>
+    </div>`;
+}
+
+/* ---------- クイズを解く ---------- */
+function openQuizPlayer(doc, questions) {
+  const review = Boolean(questions && questions.length);
+  state.player = {
+    doc,
+    questions: review ? questions : doc.quiz.questions,
+    review,
+    index: 0,
+    answers: [],
+  };
+  $('#quiz-doc-title').textContent = doc.title;
+  $('#quiz-player').hidden = false;
+  document.body.classList.add('is-locked');
+  renderQuizStage();
+}
+
+function closeQuizPlayer() {
+  $('#quiz-player').hidden = true;
+  if ($('#detail').hidden) document.body.classList.remove('is-locked');
+  state.player = null;
+}
+
+function renderQuizProgressBar(done, total) {
+  $('#quiz-bar-fill').style.width = `${Math.round((done / total) * 100)}%`;
+  $('#quiz-step').textContent = done >= total ? '結果' : `${done + 1} / ${total}`;
+}
+
+function renderQuizStage() {
+  const player = state.player;
+  const total = player.questions.length;
+  renderQuizProgressBar(player.index, total);
+
+  if (player.index >= total) return renderQuizResult();
+
+  const question = player.questions[player.index];
+  const kind = kindOf(question.kind);
+  const answered = player.answers[player.index];
+
+  const choices = question.choices
+    .map((choice, index) => {
+      let cls = 'choice';
+      if (answered !== undefined) {
+        if (index === question.answer) cls += ' is-correct';
+        else if (index === answered) cls += ' is-wrong';
+        else cls += ' is-dim';
+      }
+      return `<button type="button" class="${cls}" data-choice="${index}" ${answered !== undefined ? 'disabled' : ''}>
+        <span class="choice-mark">${CHOICE_MARKS[index] || index + 1}</span>
+        <span>${esc(choice)}</span>
+      </button>`;
+    })
+    .join('');
+
+  const feedback =
+    answered === undefined
+      ? ''
+      : `<div class="feedback ${answered === question.answer ? 'is-correct' : 'is-wrong'}">
+          <p class="feedback-head">${answered === question.answer ? '⭕️ 正解' : '❌ 不正解'}</p>
+          ${question.why ? `<p><b>なぜ</b>${esc(question.why)}</p>` : ''}
+          ${question.consequence ? `<p><b>やらないと</b>${esc(question.consequence)}</p>` : ''}
+          ${question.failure ? `<p class="feedback-failure"><b>実際にあった失敗</b>${esc(question.failure)}</p>` : ''}
+          ${question.source ? `<p class="feedback-source">出典: ${esc(question.source)}</p>` : ''}
+        </div>
+        <div class="actions">
+          <button type="button" class="btn btn-primary" id="quiz-next">
+            ${player.index + 1 >= total ? '結果を見る →' : '次の問題 →'}
+          </button>
+        </div>`;
+
+  $('#quiz-stage').innerHTML = `
+    <span class="kind-badge">${kind.emoji} ${esc(kind.label)}</span>
+    <h3 class="quiz-question">${esc(question.question)}</h3>
+    <div class="choices">${choices}</div>
+    ${feedback}`;
+}
+
+function renderQuizResult() {
+  const player = state.player;
+  const questions = player.questions;
+  const wrong = questions.filter((q, i) => player.answers[i] !== q.answer);
+  const correct = questions.length - wrong.length;
+  const overall = saveProgress(player.doc.id, {
+    review: player.review,
+    correct,
+    total: questions.length,
+    wrongIds: wrong.map((q) => q.id),
+    clearedIds: questions.filter((q, i) => player.answers[i] === q.answer).map((q) => q.id),
+  });
+
+  const message =
+    wrong.length === 0
+      ? 'この手順の「なぜ」は、もう自分のものです。'
+      : `間違えた${wrong.length}問が、いま資料で読むべきところです。`;
+
+  $('#quiz-stage').innerHTML = `
+    <div class="quiz-result">
+      <p class="score"><b>${correct}</b> / ${questions.length}</p>
+      <p class="hint">${message}</p>
+      ${player.review ? `<p class="hint">この資料の通算: ${overall.correct} / ${overall.total}</p>` : ''}
+    </div>
+    ${
+      wrong.length
+        ? `<ul class="review-list">${wrong
+            .map(
+              (q) => `<li>
+                <p class="review-q">${esc(q.question)}</p>
+                <p class="review-a">→ ${esc(q.choices[q.answer])}</p>
+                ${q.why ? `<p class="review-why">${esc(q.why)}</p>` : ''}
+              </li>`,
+            )
+            .join('')}</ul>`
+        : ''
+    }
+    <div class="actions">
+      ${wrong.length ? '<button type="button" class="btn btn-primary" id="quiz-retry">間違えた問題だけもう一度</button>' : ''}
+      <button type="button" class="btn" id="quiz-read">📖 資料を読む</button>
+      <button type="button" class="btn" id="quiz-finish">閉じる</button>
+    </div>`;
+}
+
+/* ---------- クイズ一覧 ---------- */
+function quizCardHtml(doc) {
+  const cat = categoryOf(doc.category);
+  const progress = progressOf(doc.id);
+  const rate = progress ? Math.round((progress.correct / progress.total) * 100) : null;
+  return `<article class="card quiz-card" data-quiz-id="${doc.id}" style="--cat:${cat.color}">
+    <div class="card-main">
+      <div class="card-top">
+        <span class="cat-badge" style="--cat:${cat.color}">${cat.emoji} ${esc(cat.label)}</span>
+        <span class="q-count">${doc.quiz.count}問</span>
+      </div>
+      <h3>${esc(doc.title)}</h3>
+      <p class="card-excerpt">${esc(doc.excerpt || '')}</p>
+      <div class="card-meta">
+        ${doc.failureCount ? `<span>💥 失敗談 ${doc.failureCount}</span>` : ''}
+        ${progress ? `<span class="score-badge ${rate === 100 ? 'is-full' : ''}">前回 ${progress.correct}/${progress.total}</span>` : '<span class="score-badge is-new">未挑戦</span>'}
+      </div>
+      <button type="button" class="btn btn-primary quiz-open">▶ 解く</button>
+    </div>
+  </article>`;
+}
+
+function renderQuizView() {
+  const docs = state.documents || [];
+  const withQuiz = docs.filter((d) => d.quiz);
+  const without = docs.filter((d) => !d.quiz);
+
+  $('#quiz-list').innerHTML = withQuiz.map(quizCardHtml).join('');
+  $('#quiz-empty').hidden = withQuiz.length > 0;
+  $('#quiz-empty').textContent = docs.length
+    ? 'まだクイズがありません。資料箱から資料を開いて「🧠 クイズを作る」を押してください。'
+    : 'まず資料を1つ作ってください。そこからクイズが作れます。';
+
+  const done = withQuiz.filter((d) => progressOf(d.id)).length;
+  $('#quiz-progress-summary').textContent = withQuiz.length
+    ? `${withQuiz.length}件中 ${done}件に挑戦ずみ`
+    : '';
+
+  $('#quiz-todo').hidden = without.length === 0;
+  $('#quiz-todo-count').textContent = `（${without.length}）`;
+  $('#quiz-todo-list').innerHTML = without
+    .map(
+      (d) => `<button type="button" class="todo-item" data-open-id="${d.id}">
+        <span>${esc(d.title)}</span>
+        ${d.failureCount ? `<em>💥 ${d.failureCount}</em>` : ''}
+      </button>`,
+    )
+    .join('');
+}
+
+/* ---------- 失敗談フォームの案内 ---------- */
+function renderFormPanel() {
+  const { formUrl, sheetUrl, backend } = state.config;
+  const body = $('#form-panel-body');
+
+  if (formUrl) {
+    body.innerHTML = `<p class="hint">
+        このURLを研究室のSlackやLINEに貼っておけば、失敗した本人がその場で1分で書けます。
+        回答はスプレッドシートに溜まり、選んだ資料の失敗談として取り込まれてクイズになります。
+      </p>
+      <div class="actions">
+        <a class="btn btn-primary" href="${esc(formUrl)}" target="_blank" rel="noopener">📝 失敗談フォームを開く</a>
+        ${sheetUrl ? `<a class="btn" href="${esc(sheetUrl)}" target="_blank" rel="noopener">📊 回答スプレッドシート</a>` : ''}
+        <button type="button" class="btn" id="form-sync">⬇️ 回答を取り込む</button>
+        <button type="button" class="btn" id="form-copy">🔗 URLをコピー</button>
+      </div>
+      <p class="hint" id="form-sync-status"></p>`;
+    return;
+  }
+
+  body.innerHTML =
+    backend === 'drive'
+      ? `<p class="hint">
+          失敗談フォームがまだありません。Apps Script のエディタで関数 <code>setupForm</code> を1回実行すると、
+          Googleフォームと回答スプレッドシートが資料箱のフォルダに作られ、ここにURLが出ます。
+        </p>`
+      : `<p class="hint">
+          Googleフォームでの収集は、保存先を Google Drive にしているときに使えます（右上の⚙）。
+          このサーバー版では、資料を開いて「💥 失敗談」から直接書くか、
+          スプレッドシートの表をコピーして「📊 表から取り込む」で貼り付けてください。
+        </p>`;
+}
+
+async function copyText(text, message) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    // クリップボードAPIが使えない環境向けの保険
+    const area = document.createElement('textarea');
+    area.value = text;
+    document.body.appendChild(area);
+    area.select();
+    document.execCommand('copy');
+    area.remove();
+  }
+  toast(message);
+}
+
 /* ---------- 作成フロー ---------- */
 function formValues(form) {
   const data = new FormData(form);
   return {
     title: (data.get('title') || '').trim(),
     memo: (data.get('memo') || '').trim(),
+    failure: (data.get('failure') || '').trim(),
     tags: (data.get('tags') || '').trim(),
     category: data.get('category') || '',
   };
@@ -354,6 +765,8 @@ const createOptions = () => ({ maxFileSize: state.config.maxFileSize });
 function switchView(view) {
   $$('.tab').forEach((tab) => tab.classList.toggle('is-active', tab.dataset.view === view));
   $$('.view').forEach((section) => section.classList.toggle('is-active', section.id === `view-${view}`));
+  // 成績はこの端末にしか無いので、タブに戻るたびに描き直す。
+  if (view === 'quiz') renderQuizView();
 }
 
 /* ---------- 保存先の設定 ---------- */
@@ -414,6 +827,7 @@ function wireSettings() {
 /** 保存先から受け取った設定を画面に反映する（保存先を切り替えるたびに呼ぶ）。 */
 function applyConfig() {
   renderStoreBadge();
+  renderFormPanel();
   if (state.config.folderUrl) $('#store-badge').title = `保存先フォルダ: ${state.config.folderUrl}`;
 
   for (const id of ['#create-drive', '#upload-drive']) {
@@ -445,6 +859,225 @@ function applyConfig() {
     $('#ai-hint').textContent =
       'APIキーが未設定のため「AIで資料を作成」は使えません。「資料作成プロンプトを出力」を使って、お手持ちのAIに貼り付けてください（自動分類はキーワードで動きます）。';
   }
+}
+
+
+/* ---------- 失敗談・クイズの操作 ---------- */
+function wireQuizUi() {
+  // 資料を更新して詳細と一覧を描き直す（失敗談・クイズはどちらも資料の一部）。
+  const refresh = async (doc, message) => {
+    renderDetail(doc);
+    await loadDocuments();
+    if (message) toast(message);
+  };
+
+  $('#detail-failures').addEventListener('click', async (event) => {
+    const target = event.target;
+    if (target.id === 'failure-toggle') {
+      const form = $('#failure-form');
+      form.hidden = !form.hidden;
+      if (!form.hidden) $('#failure-what').focus();
+      return;
+    }
+    if (target.id === 'failure-import-toggle') {
+      $('#failure-import').hidden = !$('#failure-import').hidden;
+      return;
+    }
+    if (target.id === 'failure-save') {
+      const what = $('#failure-what').value.trim();
+      if (!what) return toast('何が起きたかを入力してください', 'warn');
+      try {
+        loading(true, '失敗談を保存しています…');
+        const doc = await API.addFailure(state.current.id, {
+          what,
+          why: $('#failure-why').value.trim(),
+          prevention: $('#failure-prevention').value.trim(),
+          author: $('#author').value.trim(),
+        });
+        await refresh(doc, 'ありがとうございます。この失敗はクイズになります。');
+      } catch (err) {
+        toast(err.message, 'error');
+      } finally {
+        loading(false);
+      }
+      return;
+    }
+    if (target.id === 'failure-import-run') {
+      const text = $('#failure-rows').value.trim();
+      if (!text) return toast('スプレッドシートの表を貼り付けてください', 'warn');
+      try {
+        loading(true, '取り込んでいます…');
+        const doc = await API.importFailures(state.current.id, text);
+        await refresh(doc, '取り込みました');
+      } catch (err) {
+        toast(err.message, 'error');
+      } finally {
+        loading(false);
+      }
+      return;
+    }
+    const remove = target.closest('.failure-remove');
+    if (remove) {
+      if (!confirm('この失敗談を削除します。よろしいですか？')) return;
+      try {
+        await refresh(await API.deleteFailure(state.current.id, remove.dataset.failureId), '削除しました');
+      } catch (err) {
+        toast(err.message, 'error');
+      }
+    }
+  });
+
+  $('#detail-quiz').addEventListener('click', async (event) => {
+    const id = event.target.id;
+    if (id === 'quiz-start') return openQuizPlayer(state.current);
+
+    if (id === 'quiz-make') {
+      const failures = (state.current.failures || []).length;
+      try {
+        loading(true, `AIがクイズを作っています…（${failures ? `失敗談${failures}件を含む` : '本文から'}）`);
+        const doc = await API.saveQuiz(state.current.id, { count: state.config.quizDefaultCount || 5 });
+        renderDetail(doc);
+        await loadDocuments();
+        openQuizPlayer(doc);
+      } catch (err) {
+        toast(err.message, 'error');
+      } finally {
+        loading(false);
+      }
+      return;
+    }
+
+    if (id === 'quiz-remove') {
+      if (!confirm('このクイズを削除します。よろしいですか？')) return;
+      try {
+        await refresh(await API.deleteQuiz(state.current.id), 'クイズを削除しました');
+      } catch (err) {
+        toast(err.message, 'error');
+      }
+      return;
+    }
+
+    if (id === 'quiz-prompt') {
+      try {
+        const prompt = await API.quizPrompt(state.current.id, { count: state.config.quizDefaultCount || 5 });
+        $('#quiz-prompt-text').textContent = prompt;
+        $('#quiz-paste').hidden = false;
+        $('#quiz-paste').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      } catch (err) {
+        toast(err.message, 'error');
+      }
+      return;
+    }
+
+    if (id === 'quiz-prompt-copy') {
+      return copyText($('#quiz-prompt-text').textContent, 'プロンプトをコピーしました');
+    }
+
+    if (id === 'quiz-json-save') {
+      const json = $('#quiz-json').value.trim();
+      if (!json) return toast('AIが出力したJSONを貼り付けてください', 'warn');
+      try {
+        loading(true, 'クイズを保存しています…');
+        const doc = await API.saveQuiz(state.current.id, { json });
+        renderDetail(doc);
+        await loadDocuments();
+        openQuizPlayer(doc);
+      } catch (err) {
+        toast(err.message, 'error');
+      } finally {
+        loading(false);
+      }
+    }
+  });
+
+  // クイズを解く
+  $('#quiz-close').addEventListener('click', closeQuizPlayer);
+  $('#quiz-player').addEventListener('click', (event) => {
+    if (event.target.id === 'quiz-player') closeQuizPlayer();
+  });
+  $('#quiz-stage').addEventListener('click', async (event) => {
+    const player = state.player;
+    if (!player) return;
+
+    const choice = event.target.closest('.choice');
+    if (choice && !choice.disabled) {
+      player.answers[player.index] = Number(choice.dataset.choice);
+      renderQuizStage();
+      return;
+    }
+
+    const id = event.target.id;
+    if (id === 'quiz-next') {
+      player.index += 1;
+      renderQuizStage();
+      return;
+    }
+    if (id === 'quiz-retry') {
+      const wrong = player.questions.filter((q, i) => player.answers[i] !== q.answer);
+      openQuizPlayer(player.doc, wrong);
+      return;
+    }
+    if (id === 'quiz-read') {
+      const doc = player.doc;
+      closeQuizPlayer();
+      try {
+        renderDetail(await API.getDocument(doc.id));
+      } catch (err) {
+        toast(err.message, 'error');
+      }
+      return;
+    }
+    if (id === 'quiz-finish') {
+      closeQuizPlayer();
+      await loadDocuments();
+    }
+  });
+
+  // クイズ一覧から直接解く
+  $('#quiz-list').addEventListener('click', async (event) => {
+    const card = event.target.closest('.quiz-card');
+    if (!card) return;
+    try {
+      loading(true, 'クイズを読み込んでいます…');
+      const doc = await API.getDocument(card.dataset.quizId);
+      if (!doc.quiz) return toast('この資料にはまだクイズがありません', 'warn');
+      openQuizPlayer(doc);
+    } catch (err) {
+      toast(err.message, 'error');
+    } finally {
+      loading(false);
+    }
+  });
+
+  $('#quiz-todo-list').addEventListener('click', async (event) => {
+    const item = event.target.closest('[data-open-id]');
+    if (!item) return;
+    try {
+      renderDetail(await API.getDocument(item.dataset.openId));
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  });
+
+  // 失敗談フォーム
+  $('#form-panel-body').addEventListener('click', async (event) => {
+    if (event.target.id === 'form-copy') {
+      return copyText(state.config.formUrl, 'フォームのURLをコピーしました');
+    }
+    if (event.target.id !== 'form-sync') return;
+    try {
+      loading(true, 'フォームの回答を取り込んでいます…');
+      const result = await API.syncForm();
+      $('#form-sync-status').textContent = result.imported
+        ? `${result.imported}件を取り込みました${result.unmatched ? `（${result.unmatched}件は資料が選ばれておらず未仕分け）` : ''}`
+        : '新しい回答はありませんでした';
+      await loadDocuments();
+    } catch (err) {
+      toast(err.message, 'error');
+    } finally {
+      loading(false);
+    }
+  });
 }
 
 async function init() {
@@ -541,22 +1174,7 @@ async function init() {
     }
   });
 
-  $('#btn-copy').addEventListener('click', async () => {
-    const text = $('#prompt-text').textContent;
-    try {
-      await navigator.clipboard.writeText(text);
-      toast('プロンプトをコピーしました');
-    } catch {
-      // クリップボードAPIが使えない環境向けの保険
-      const area = document.createElement('textarea');
-      area.value = text;
-      document.body.appendChild(area);
-      area.select();
-      document.execCommand('copy');
-      area.remove();
-      toast('プロンプトをコピーしました');
-    }
-  });
+  $('#btn-copy').addEventListener('click', () => copyText($('#prompt-text').textContent, 'プロンプトをコピーしました'));
 
   // AIの出力を貼り付けて保存
   $('#btn-save-pasted').addEventListener('click', async () => {
@@ -610,7 +1228,9 @@ async function init() {
     if (event.target.id === 'detail') closeDetail();
   });
   document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape' && !$('#detail').hidden) closeDetail();
+    if (event.key !== 'Escape') return;
+    if (!$('#quiz-player').hidden) return closeQuizPlayer();
+    if (!$('#detail').hidden) closeDetail();
   });
   $('#btn-download').addEventListener('click', () => API.downloadMarkdown(state.current));
   $('#btn-edit').addEventListener('click', () => (state.editing ? renderDetail(state.current) : openEditor()));
@@ -647,6 +1267,8 @@ async function init() {
       toast(err.message, 'error');
     }
   });
+
+  wireQuizUi();
 
   await loadDocuments();
 }

@@ -9,7 +9,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const sources = ['server/categories.js', 'server/classify.js', 'server/prompts.js'];
+// 連結順にそのまま評価されるため、他のファイルの const を参照するものを後ろに置くこと。
+const sources = ['server/categories.js', 'server/classify.js', 'server/quiz.js', 'server/prompts.js'];
 const out = path.join(root, 'gas', 'shared.gs');
 
 const header = `/*

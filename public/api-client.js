@@ -127,7 +127,7 @@
 
   async function toFormData(input) {
     const form = new FormData();
-    for (const key of ['mode', 'title', 'memo', 'tags', 'category', 'author', 'body']) {
+    for (const key of ['mode', 'title', 'memo', 'tags', 'category', 'author', 'body', 'failure']) {
       if (input[key] !== undefined) form.set(key, input[key]);
     }
     for (const file of await prepareFiles(input.files)) form.append('files', file);
@@ -203,6 +203,66 @@
     async deleteDocument(id) {
       if (isDrive()) return drive('delete', { id });
       return local(`/api/documents/${id}`, { method: 'DELETE' });
+    },
+
+    /* ---- 失敗談 ---- */
+
+    async addFailure(id, failure) {
+      if (isDrive()) return (await drive('addFailure', { id, failure })).document;
+      return local(`/api/documents/${id}/failures`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(failure),
+      });
+    },
+
+    async deleteFailure(id, failureId) {
+      if (isDrive()) return (await drive('deleteFailure', { id, failureId })).document;
+      return local(`/api/documents/${id}/failures/${failureId}`, { method: 'DELETE' });
+    },
+
+    /** 回答スプレッドシートからコピーした表を、そのまま失敗談として取り込む。 */
+    async importFailures(id, text) {
+      if (isDrive()) return (await drive('importFailures', { id, text })).document;
+      return local(`/api/documents/${id}/failures/import`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+    },
+
+    /** Googleフォームの回答を各資料に取り込む（Drive版のみ）。 */
+    async syncForm() {
+      if (!isDrive()) throw new Error('失敗談フォームは Google Drive を保存先にしているときだけ使えます');
+      return drive('syncForm');
+    },
+
+    /* ---- クイズ ---- */
+
+    async quizPrompt(id, options = {}) {
+      if (isDrive()) return (await drive('quizPrompt', { id, ...options })).prompt;
+      return (
+        await local(`/api/documents/${id}/quiz/prompt`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(options),
+        })
+      ).prompt;
+    },
+
+    /** payload が空ならAIに作らせ、json / quiz があればそれを取り込む。 */
+    async saveQuiz(id, payload = {}) {
+      if (isDrive()) return (await drive('saveQuiz', { id, ...payload })).document;
+      return local(`/api/documents/${id}/quiz`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async deleteQuiz(id) {
+      if (isDrive()) return (await drive('deleteQuiz', { id })).document;
+      return local(`/api/documents/${id}/quiz`, { method: 'DELETE' });
     },
 
     async buildPrompt(input) {
