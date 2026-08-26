@@ -24,11 +24,12 @@ const QUIZ_FILE = 'クイズ.json';
  * 質問文は「取り込みのときに列を見つける鍵」でもあるので、Apps Script側で勝手に変えないこと
  * （フォームの文言を変えたい場合はここを直してから setupForm を実行しなおす）。
  */
-const FORM_TITLE = '失敗談ボックス';
-const Q_TARGET = 'どの作業・プロトコルの失敗ですか？';
-const Q_WHAT = '何が起きましたか？';
-const Q_WHY = 'なぜ起きたと思いますか？';
-const Q_PREVENT = 'どうすれば防げますか？';
+const FORM_TITLE = '失敗談アーカイブ';
+const Q_TARGET = 'どの作業・プロトコルの記録ですか？';
+const Q_PURPOSE = '目的：何をしようとしていましたか？';
+const Q_WHAT = '起きたこと：何が起きましたか？';
+const Q_WHY = '判断と理由：どう考えて、なぜそう判断しましたか？';
+const Q_NEXT = '次の手：このあとどうしましたか／どうする予定ですか？';
 const Q_AUTHOR = 'お名前（任意）';
 const SYNC_COLUMN = '取り込み';
 const TARGET_NONE = '（まだ決まっていない・あとで仕分ける）';
@@ -581,7 +582,7 @@ function addFailure_(request) {
   const { root, index, meta } = metaOf_(String(request.id || ''));
   const folder = DriveApp.getFolderById(meta.folderId);
   const what = String((request.failure && request.failure.what) || '').trim();
-  if (!what) throw new Error('何が起きたかを入力してください');
+  if (!what) throw new Error('起きたことを入力してください');
 
   const failures = readFailures_(folder);
   if (failures.length >= MAX_FAILURES) {
@@ -725,13 +726,34 @@ function setupForm() {
   } else {
     form = FormApp.create(FORM_TITLE);
     form.setDescription(
-      'うまくいかなかったことを、覚えているうちに1つだけ書いてください。\n' +
-        '書いた失敗は、後輩が解くクイズになります。犯人探しには使いません。',
+      'うまくいかなかったことを、覚えているうちに1件だけ書いてください。1分で終わります。\n\n' +
+        '成果だけを見ても分からない部分——何をしようとして、何が起きて、なぜそう判断したか——を、' +
+        '下級生が目的から辿れるようにするための記録です。書いた内容はクイズになります。\n\n' +
+        '思い出せない欄は「記録なし」と書くか、空のまま送ってください。' +
+        '空欄は埋め忘れではなく、その場に居なかった人にはもう復元できない情報が' +
+        'どこで失われたかを示す記録として扱います。犯人探しには使いません。',
     );
     form.addListItem().setTitle(Q_TARGET).setRequired(true);
-    form.addParagraphTextItem().setTitle(Q_WHAT).setHelpText('起きたことだけを短く。例: 形質転換のコロニーが1つも生えなかった').setRequired(true);
-    form.addParagraphTextItem().setTitle(Q_WHY).setHelpText('分かる範囲で。例: コンピテントセルを氷から出したまま置いてしまった');
-    form.addParagraphTextItem().setTitle(Q_PREVENT).setHelpText('次の人が同じ失敗をしないために');
+    form
+      .addParagraphTextItem()
+      .setTitle(Q_PURPOSE)
+      .setHelpText('例: NEBuilder用の断片をPCRで増やす');
+    form
+      .addParagraphTextItem()
+      .setTitle(Q_WHAT)
+      .setHelpText('起きたことだけを、口語のままで構いません。例: 増幅がうまくいかなかった')
+      .setRequired(true);
+    form
+      .addParagraphTextItem()
+      .setTitle(Q_WHY)
+      .setHelpText(
+        'ここが、あとから誰にも復元できない唯一の欄です。' +
+          '例: 結合部分だけのTmを見るべきところ、プライマー全長のTmをそのまま使っていた',
+      );
+    form
+      .addParagraphTextItem()
+      .setTitle(Q_NEXT)
+      .setHelpText('例: 結合部分のTmで再設定。まだ決まっていなければ「記録なし」で構いません');
     form.addTextItem().setTitle(Q_AUTHOR);
 
     const sheet = SpreadsheetApp.create(FORM_TITLE + 'の回答');
@@ -803,9 +825,10 @@ function syncFormResponses_() {
 
   const cols = {
     target: columnIndexOf_(header, Q_TARGET),
+    purpose: columnIndexOf_(header, Q_PURPOSE),
     what: columnIndexOf_(header, Q_WHAT),
     why: columnIndexOf_(header, Q_WHY),
-    prevention: columnIndexOf_(header, Q_PREVENT),
+    next: columnIndexOf_(header, Q_NEXT),
     author: columnIndexOf_(header, Q_AUTHOR),
   };
   if (cols.what === -1) throw new Error('回答シートに「' + Q_WHAT + '」の列が見つかりません');
@@ -839,10 +862,13 @@ function syncFormResponses_() {
     failures.push(
       normalizeFailure(
         {
+          purpose: cell(row, cols.purpose),
           what: what,
           why: cell(row, cols.why),
-          prevention: cell(row, cols.prevention),
+          next: cell(row, cols.next),
           author: cell(row, cols.author),
+          // 出典は行の位置から起こす。あとで原文に戻れるようにしておく。
+          source: FORM_TITLE + ' 回答' + (i + 2) + '行目',
         },
         'form' + Utilities.getUuid().slice(0, 6),
         new Date().toISOString(),

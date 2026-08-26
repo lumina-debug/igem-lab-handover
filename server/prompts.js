@@ -150,7 +150,11 @@ export const QUIZ_SYSTEM_PROMPT = `あなたは研究室でプロトコル（実
   明らかにふざけた選択肢・長さで正解が分かる選択肢を作らない（選択肢の長さと具体性は揃える）。
 - 解説（why）には必ず理由を書く。「手順書にそう書いてあるから」は理由ではない。
 - 失敗談が与えられている場合は、それを最優先の出題源にする。実際に起きた失敗は、
-  資料のどの記述よりも「なぜ」が濃い。`;
+  資料のどの記述よりも「なぜ」が濃い。
+- ただし「判断と理由: 記録なし」の失敗談から、理由を推測して問題を作ってはいけない。
+  そこは当時その場に居た人しか知らなかったことが、既に失われた場所である。
+  もっともらしい理由で埋めると、失われた事実が正解として固定されてしまう。
+  出題に使うのは、判断と理由が実際に書かれている失敗談と、資料本文に根拠がある記述だけにする。`;
 
 const QUIZ_SECTION_HINT = `- why: なぜその手順なのか、理由・原理を問う（最優先）
 - judge: 現場で条件が変わったときにどう判断するかを問う
@@ -178,13 +182,28 @@ export function buildQuizPrompt({ title, body, failures = [], count = QUIZ_DEFAU
   lines.push('');
 
   if (failureText) {
+    const reasoned = failures.filter((f) => String((f && f.why) || '').trim());
     lines.push('### この作業で実際にあった失敗談');
+    lines.push('各項目は「目的 / 起きたこと / 判断と理由 / 次の手」です。');
+    lines.push('「記録なし」は書き忘れではなく、その場に居なかった人にはもう復元できない情報を指します。');
     lines.push('"""');
     lines.push(failureText);
     lines.push('"""');
     lines.push('');
-    lines.push(`失敗談が${failures.length}件あります。少なくとも${Math.min(failures.length, count)}問は失敗談を題材にし、`);
-    lines.push('その問題の failure に、どの失敗談を元にしたかを1文で書いてください。');
+    if (reasoned.length) {
+      lines.push(
+        `判断と理由が残っている失敗談が${reasoned.length}件あります。` +
+          `少なくとも${Math.min(reasoned.length, count)}問はそこから作り、`,
+      );
+      lines.push('その問題の failure に、どの失敗談を元にしたかを1文で書いてください。');
+    }
+    if (reasoned.length < failures.length) {
+      lines.push(
+        `判断と理由が「記録なし」の失敗談が${failures.length - reasoned.length}件あります。` +
+          'これらの理由を推測して出題しないでください。',
+      );
+      lines.push('起きたことの記述を、資料本文に根拠がある問題の材料として使うのは構いません。');
+    }
     lines.push('');
   }
 

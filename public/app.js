@@ -416,14 +416,36 @@ function saveProgress(docId, round) {
 }
 
 /* ---------- 失敗談 ---------- */
+/*
+ * 空欄は消さずに「記録なし」と出す。
+ * 埋め忘れではなく、その場に居なかった人にはもう復元できない情報がどこで失われたかを示すため。
+ */
+function fieldLine(label, value, className = '') {
+  const filled = String(value || '').trim();
+  return `<p class="failure-line ${className}"><b>${label}</b>${
+    filled ? esc(filled) : '<span class="record-none">記録なし</span>'
+  }</p>`;
+}
+
 function failureHtml(failure) {
-  const parts = [`<p class="failure-what">${esc(failure.what)}</p>`];
-  if (failure.why) parts.push(`<p class="failure-line"><b>なぜ</b>${esc(failure.why)}</p>`);
-  if (failure.prevention) parts.push(`<p class="failure-line"><b>次から</b>${esc(failure.prevention)}</p>`);
-  return `<li class="failure" data-failure-id="${esc(failure.id)}">
+  const next = failure.next || failure.prevention;
+  const parts = [];
+  if (failure.purpose) parts.push(fieldLine('目的', failure.purpose));
+  parts.push(`<p class="failure-what">${esc(failure.what)}</p>`);
+  // 判断と理由だけは、空でも必ず行を出す。ここが失われた場所そのものだから。
+  parts.push(fieldLine('判断と理由', failure.why, 'is-reason'));
+  if (next || failure.purpose) parts.push(fieldLine('次の手', next));
+
+  return `<li class="failure ${failure.why ? '' : 'is-unreasoned'}" data-failure-id="${esc(failure.id)}">
     <div class="failure-body">${parts.join('')}</div>
     <div class="failure-foot">
-      <span>${failure.author ? esc(failure.author) : '匿名'} · ${formatDate(failure.createdAt)}</span>
+      <span>${[
+        failure.source ? esc(failure.source) : '',
+        failure.author ? esc(failure.author) : '',
+        formatDate(failure.createdAt),
+      ]
+        .filter(Boolean)
+        .join(' · ')}</span>
       <button type="button" class="link-btn failure-remove" data-failure-id="${esc(failure.id)}">削除</button>
     </div>
   </li>`;
@@ -431,38 +453,50 @@ function failureHtml(failure) {
 
 function renderFailures(doc) {
   const failures = doc.failures || [];
+  const unreasoned = failures.filter((f) => !String(f.why || '').trim()).length;
+
   $('#detail-failures').innerHTML = `
     <div class="section-head">
       <h3>💥 失敗談 <span class="count">${failures.length}</span></h3>
       <button type="button" class="link-btn" id="failure-toggle">＋ 書く</button>
     </div>
     ${
+      unreasoned
+        ? `<p class="notice">判断と理由が記録に残っていないものが${unreasoned}件あります。
+             ここはクイズにできません——覚えている人が居るうちに聞いておく場所です。</p>`
+        : ''
+    }
+    ${
       failures.length
         ? `<ul class="failure-list">${failures.map(failureHtml).join('')}</ul>`
-        : '<p class="hint">まだありません。うまくいかなかったことを1つ書くと、それが後輩へのクイズになります。</p>'
+        : '<p class="hint">まだありません。うまくいかなかったことを1件書くと、それが後輩へのクイズになります。</p>'
     }
     <div class="failure-form" id="failure-form" hidden>
+      <p class="hint">思い出せない欄は空のままで構いません。「記録なし」として残ります。</p>
       <label class="field">
-        <span>何が起きた？<em class="req">必須</em></span>
-        <textarea id="failure-what" rows="2" placeholder="例: コロニーが1つも生えなかった"></textarea>
+        <span>目的<em>（何をしようとしていた？）</em></span>
+        <textarea id="failure-purpose" rows="2" placeholder="例: NEBuilder用の断片をPCRで増やす"></textarea>
       </label>
-      <div class="grid-2">
-        <label class="field">
-          <span>なぜ起きた？<em>（分かれば）</em></span>
-          <textarea id="failure-why" rows="2" placeholder="例: コンピテントセルを氷から出したまま置いた"></textarea>
-        </label>
-        <label class="field">
-          <span>どうすれば防げる？<em>（分かれば）</em></span>
-          <textarea id="failure-prevention" rows="2" placeholder="例: 使う直前まで氷上に置く"></textarea>
-        </label>
-      </div>
+      <label class="field">
+        <span>起きたこと<em class="req">必須</em></span>
+        <textarea id="failure-what" rows="2" placeholder="例: 増幅がうまくいかなかった"></textarea>
+      </label>
+      <label class="field">
+        <span>判断と理由<em>（どう考えて、なぜそう判断した？）</em></span>
+        <textarea id="failure-why" rows="3" placeholder="例: 結合部分だけのTmを見るべきところ、プライマー全長のTmをそのまま使っていた"></textarea>
+        <em class="field-note">あとから誰にも復元できないのは、この欄だけです。</em>
+      </label>
+      <label class="field">
+        <span>次の手<em>（このあとどうした／どうする？）</em></span>
+        <textarea id="failure-next" rows="2" placeholder="例: 結合部分のTmで再設定"></textarea>
+      </label>
       <div class="actions">
-        <button type="button" class="btn btn-primary" id="failure-save">💾 失敗談を残す</button>
+        <button type="button" class="btn btn-primary" id="failure-save">💾 記録を残す</button>
         <button type="button" class="btn" id="failure-import-toggle">📊 表から取り込む</button>
       </div>
       <label class="field" id="failure-import" hidden>
-        <span>回答スプレッドシートの表を貼り付け<em>（見出し行ごと貼って大丈夫です）</em></span>
-        <textarea id="failure-rows" rows="4" placeholder="何が起きましたか	なぜ起きたと思いますか	どうすれば防げますか	お名前"></textarea>
+        <span>スプレッドシートの表を貼り付け<em>（見出し行ごと貼って大丈夫です）</em></span>
+        <textarea id="failure-rows" rows="4" placeholder="目的	起きたこと	判断と理由	次の手	出典"></textarea>
         <div class="actions">
           <button type="button" class="btn" id="failure-import-run">📥 まとめて取り込む</button>
         </div>
@@ -598,6 +632,24 @@ function renderQuizStage() {
     ${feedback}`;
 }
 
+/*
+ * 理由が記録に残っていない失敗を、クイズの最後に見せる。
+ * ここは出題できない代わりに、「先輩が居るうちに聞くべきこと」の一覧になる。
+ */
+function unreasonedBlock(doc) {
+  const unreasoned = (doc.failures || []).filter((f) => !String(f.why || '').trim());
+  if (!unreasoned.length) return '';
+  return `<div class="unreasoned">
+    <p class="unreasoned-head">まだ誰も答えを書いていない失敗が${unreasoned.length}件あります</p>
+    <p class="hint">出題できたのは理由が残っているものだけです。下は、先輩が居るうちに聞いておく候補です。</p>
+    <ul>${unreasoned
+      .slice(0, 5)
+      .map((f) => `<li>${esc(f.what)}${f.purpose ? `<em>（${esc(f.purpose)}）</em>` : ''}</li>`)
+      .join('')}</ul>
+    ${unreasoned.length > 5 ? `<p class="hint">ほか${unreasoned.length - 5}件</p>` : ''}
+  </div>`;
+}
+
 function renderQuizResult() {
   const player = state.player;
   const questions = player.questions;
@@ -635,6 +687,7 @@ function renderQuizResult() {
             .join('')}</ul>`
         : ''
     }
+    ${unreasonedBlock(player.doc)}
     <div class="actions">
       ${wrong.length ? '<button type="button" class="btn btn-primary" id="quiz-retry">間違えた問題だけもう一度</button>' : ''}
       <button type="button" class="btn" id="quiz-read">📖 資料を読む</button>
@@ -885,16 +938,23 @@ function wireQuizUi() {
     }
     if (target.id === 'failure-save') {
       const what = $('#failure-what').value.trim();
-      if (!what) return toast('何が起きたかを入力してください', 'warn');
+      if (!what) return toast('起きたことを入力してください', 'warn');
+      const why = $('#failure-why').value.trim();
       try {
         loading(true, '失敗談を保存しています…');
         const doc = await API.addFailure(state.current.id, {
+          purpose: $('#failure-purpose').value.trim(),
           what,
-          why: $('#failure-why').value.trim(),
-          prevention: $('#failure-prevention').value.trim(),
+          why,
+          next: $('#failure-next').value.trim(),
           author: $('#author').value.trim(),
         });
-        await refresh(doc, 'ありがとうございます。この失敗はクイズになります。');
+        await refresh(
+          doc,
+          why
+            ? 'ありがとうございます。この判断はクイズになります。'
+            : '記録しました。判断と理由は「記録なし」として残ります。',
+        );
       } catch (err) {
         toast(err.message, 'error');
       } finally {

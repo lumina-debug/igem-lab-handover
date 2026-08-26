@@ -45,22 +45,53 @@ export function clampQuestionCount(value) {
   return Math.min(QUIZ_MAX_COUNT, Math.max(QUIZ_MIN_COUNT, n));
 }
 
+/*
+ * 記録が無いことを表す値。空欄と同じ扱いにするが、画面には「記録なし」と出す。
+ * 埋め忘れではなく「その場に居なかった人には復元できない情報が、どこで失われたか」を示すため
+ * ——空欄を消してしまうと、失われたこと自体が見えなくなる。
+ */
+export const RECORD_NONE = '記録なし';
+const NONE_WORDS = ['記録なし', '記録無し', 'なし', '無し', '不明', '-', '—', 'ー'];
+
+/** 「記録なし」と書かれた欄は、空欄と同じ正規形（空文字）に寄せる。 */
+function recorded(value) {
+  const text = trimmed(value);
+  return NONE_WORDS.indexOf(text) === -1 ? text : '';
+}
+
+/** 画面やプロンプトに出すときは、空欄を「記録なし」として明示する。 */
+export function orRecordNone(value) {
+  return trimmed(value) || RECORD_NONE;
+}
+
 /**
  * 失敗談1件を保存できる形に整える。
- * 必須は what（何が起きたか）だけ。why が空でも受け取る——書ける人がその場で書ける量だけ残せるように。
+ *
+ * 項目は「目的 / 起きたこと / 判断と理由 / 次の手 / 出典」。
+ * 必須は what（起きたこと）だけで、あとは空でも受け取る——書ける人がその場で書ける量だけ残せるように。
+ * とくに why（判断と理由）は、あとから誰にも復元できない唯一の項目なので、
+ * 無ければ無いまま「記録なし」として残す（もっともらしい理由で埋めない）。
  */
 export function normalizeFailure(raw, id, now) {
   const input = raw || {};
-  const what = trimmed(input.what);
+  const what = recorded(input.what);
   return {
     id: id,
     title: trimmed(input.title) || firstLineOf(what, 32) || '失敗談',
+    purpose: recorded(input.purpose),
     what: what,
-    why: trimmed(input.why),
-    prevention: trimmed(input.prevention),
-    author: trimmed(input.author),
+    why: recorded(input.why),
+    // 「次の手」は以前「どうすれば防げるか」だった項目。古い記録もそのまま読めるようにする。
+    next: recorded(input.next) || recorded(input.prevention),
+    source: recorded(input.source),
+    author: recorded(input.author),
     createdAt: trimmed(input.createdAt) || now || new Date().toISOString(),
   };
+}
+
+/** その失敗談が「なぜ」を持っているか。クイズの出題源になれるかの判定に使う。 */
+export function hasReason(failure) {
+  return Boolean(failure && trimmed(failure.why));
 }
 
 /** 失敗談をプロンプトに載せる形の文字列にする（AI生成とプロンプト出力の両方で使う）。 */
@@ -70,10 +101,14 @@ export function failuresToText(failures) {
   return list
     .map((f, index) => {
       const lines = [`${index + 1}. ${f.title || firstLineOf(f.what, 32)}`];
-      if (f.what) lines.push(`   - 何が起きたか: ${f.what}`);
-      if (f.why) lines.push(`   - なぜ起きたか: ${f.why}`);
-      if (f.prevention) lines.push(`   - どうすれば防げるか: ${f.prevention}`);
-      if (f.author) lines.push(`   - 語った人: ${f.author}`);
+      lines.push(`   - 目的: ${orRecordNone(f.purpose)}`);
+      lines.push(`   - 起きたこと: ${orRecordNone(f.what)}`);
+      // 判断と理由・次の手は、空でも「記録なし」と明示して渡す。
+      // 欠けていることが分からないと、AIはもっともらしい理由を作ってしまう。
+      lines.push(`   - 判断と理由: ${orRecordNone(f.why)}`);
+      lines.push(`   - 次の手: ${orRecordNone(f.next || f.prevention)}`);
+      if (f.source) lines.push(`   - 出典: ${f.source}`);
+      if (f.author) lines.push(`   - 記録した人: ${f.author}`);
       return lines.join('\n');
     })
     .join('\n');
@@ -245,11 +280,17 @@ function splitRow(line) {
   return cells;
 }
 
+/*
+ * 見出しから列の意味を当てる手がかり。上から順に照合し、先に当たったものを採る。
+ * フォームの回答シートと、手で作った表の両方を同じ形に落とせるようにする。
+ */
 const FAILURE_HEADER_HINTS = [
-  { key: 'what', words: ['何が', 'なにが', '起き', '失敗', 'できごと', '内容'] },
-  { key: 'why', words: ['なぜ', '理由', '原因'] },
-  { key: 'prevention', words: ['防', '対策', '次から', 'どうすれば'] },
-  { key: 'author', words: ['名前', '氏名', '回答者', '記入者'] },
+  { key: 'purpose', words: ['目的', '何をしよう', 'しようとして', 'ねらい'] },
+  { key: 'what', words: ['起きたこと', '何が起き', '起き', '何が', 'なにが', '失敗', 'できごと', '内容'] },
+  { key: 'why', words: ['判断と理由', '判断', 'なぜ', '理由', '原因'] },
+  { key: 'next', words: ['次の手', '次に', 'このあと', '防', '対策', '次から', 'どうすれば'] },
+  { key: 'source', words: ['出典', '元記録', 'リンク', 'ソース'] },
+  { key: 'author', words: ['名前', '氏名', '回答者', '記入者', '記録した'] },
 ];
 
 /** 見出し行があれば列の意味を拾う。無ければ what / why / prevention / author の順とみなす。 */
@@ -283,15 +324,18 @@ export function parseFailureRows(input) {
 
   const rows = lines.map(splitRow);
   const header = mapHeader(rows[0]);
-  const columns = header || { what: 0, why: 1, prevention: 2, author: 3 };
+  // 見出しが無い表は「目的 / 起きたこと / 判断と理由 / 次の手 / 出典 / 名前」の順とみなす。
+  const columns = header || { purpose: 0, what: 1, why: 2, next: 3, source: 4, author: 5 };
   const body = header ? rows.slice(1) : rows;
 
   const at = (cells, index) => (index === undefined ? '' : trimmed(cells[index]));
   return body
     .map((cells) => ({
+      purpose: at(cells, columns.purpose),
       what: at(cells, columns.what),
       why: at(cells, columns.why),
-      prevention: at(cells, columns.prevention),
+      next: at(cells, columns.next),
+      source: at(cells, columns.source),
       author: at(cells, columns.author),
     }))
     .filter((row) => row.what);
